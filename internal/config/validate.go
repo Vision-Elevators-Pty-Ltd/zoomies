@@ -1044,6 +1044,20 @@ func (c *Config) validateScheduler(add func(Finding)) {
 			Fix:    "set scheduler.memory_overcommit_percent back to 100 to book each host's memory once.",
 		})
 	}
+	if c.Scheduler.StartChargePercent < 10 || c.Scheduler.StartChargePercent > 100 {
+		add(Finding{
+			Code: "scheduler.start_charge_percent", Severity: SeverityError, Setting: "scheduler.start_charge_percent",
+			Title: "start_charge_percent must be between 10 and 100",
+			Fix:   "use 100 to hold a starting runner's whole size against the host, or as little as 10.",
+		})
+	} else if c.Scheduler.StartChargePercent < 100 {
+		add(Finding{
+			Code: "scheduler.start_charge_reduced", Severity: SeverityWarning, Setting: "scheduler.start_charge_percent",
+			Title:  "starting runners are charged less than their size",
+			Detail: fmt.Sprintf("a runner that is still starting is held against its host's measured free memory and CPU at %d%% of its size, or what its job is known to need. Several started together can then reach more than the host has free once their jobs run.", c.Scheduler.StartChargePercent),
+			Fix:    "set scheduler.start_charge_percent back to 100 to charge each start its whole size.",
+		})
+	}
 	if c.Scheduler.CPUOvercommitPercent < 100 || c.Scheduler.CPUOvercommitPercent > 800 {
 		add(Finding{
 			Code: "scheduler.cpu_overcommit_percent", Severity: SeverityError, Setting: "scheduler.cpu_overcommit_percent",

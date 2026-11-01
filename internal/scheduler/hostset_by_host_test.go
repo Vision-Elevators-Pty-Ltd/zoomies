@@ -41,6 +41,11 @@ func referenceNewHostSet(hosts []*store.Host, pools []*store.Pool, runners map[s
 		promisedMemory: make(map[string]int64, len(hosts)),
 		ours:           make(map[string]bool, len(hosts)),
 		now:            now,
+		// A whole start charge, the default: the booking and the measurement
+		// are each the room left, kept apart only so a lower charge can tell them apart.
+		startChargePercent: 100,
+		bookedMemory:       make(map[string]int64, len(hosts)),
+		measuredMemory:     make(map[string]int64, len(hosts)),
 	}
 	for _, h := range hs.hosts {
 		hs.free[h.ID] = h.Free()
@@ -62,8 +67,10 @@ func referenceNewHostSet(hosts []*store.Host, pools []*store.Pool, runners map[s
 		hs.promisedMemory[h.ID] = l.MemoryMB
 		hs.ours[h.ID] = referenceHostRunsOurs(h, runners)
 		pending := hs.referencePending(h, pools, runners)
+		hs.bookedMemory[h.ID] = l.MemoryMB
 		if h.Usage.Fresh(now) {
 			if v := h.Usage.MemoryAvailableMB; v != nil {
+				hs.measuredMemory[h.ID] = max(*v-pending.MemoryMB, 0)
 				// The host sample already includes running work, and what the
 				// operating system itself is using is the reserve's whole
 				// job, so the reserve is not taken off here. It is already

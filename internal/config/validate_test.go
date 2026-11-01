@@ -1167,3 +1167,20 @@ func TestTheCPUOvercommitIsRefusedOutsideItsRangeAndWarnedAboveOneHundred(t *tes
 		}
 	}
 }
+
+func TestTheStartChargeIsRefusedOutsideItsRangeAndWarnedBelowOneHundred(t *testing.T) {
+	for _, tc := range []struct {
+		percent       int
+		refused, warn bool
+	}{{9, true, false}, {10, false, true}, {30, false, true}, {100, false, false}, {101, true, false}} {
+		c := Default()
+		c.Scheduler.StartChargePercent = tc.percent
+		f := c.Validate()
+		if got := hasCode(f, "scheduler.start_charge_percent"); got != tc.refused {
+			t.Errorf("%d%% refused = %v, want %v", tc.percent, got, tc.refused)
+		}
+		if got := hasCode(f, "scheduler.start_charge_reduced"); got != tc.warn {
+			t.Errorf("%d%% warned = %v, want %v", tc.percent, got, tc.warn)
+		}
+	}
+}

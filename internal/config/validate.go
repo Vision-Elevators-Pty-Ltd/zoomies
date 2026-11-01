@@ -1026,6 +1026,23 @@ func (c *Config) validateScheduler(add func(Finding)) {
 			Fix:   "use 1 to re-run a broken run once, or turn scheduler.auto_rerun off.",
 		})
 	}
+	if c.Scheduler.MemoryOvercommitPercent < 100 || c.Scheduler.MemoryOvercommitPercent > 300 {
+		// Below 100 would book less than the machine, which the reserve already
+		// does with a name; past 300 the booking says nothing about the machine
+		// and the measured check is doing all of the work.
+		add(Finding{
+			Code: "scheduler.memory_overcommit_percent", Severity: SeverityError, Setting: "scheduler.memory_overcommit_percent",
+			Title: "memory_overcommit_percent must be between 100 and 300",
+			Fix:   "use 100 to book each host's memory once, or up to 300 to book it three times over.",
+		})
+	} else if c.Scheduler.MemoryOvercommitPercent > 100 {
+		add(Finding{
+			Code: "scheduler.memory_overcommit_on", Severity: SeverityWarning, Setting: "scheduler.memory_overcommit_percent",
+			Title:  "hosts' memory is booked more than once",
+			Detail: fmt.Sprintf("the scheduler books up to %d%% of each host's allocatable memory. A runner still starts only where its size and the reserve are measured free, but runners already placed can grow into each other: if enough of them reach their limits at once, the kernel kills one.", c.Scheduler.MemoryOvercommitPercent),
+			Fix:    "set scheduler.memory_overcommit_percent back to 100 to book each host's memory once.",
+		})
+	}
 	// A runner's start is bounded three times over, and this is the only one
 	// that gives up: the agent allows itself RunnerCreateBudget for the create,
 	// the controller will not re-offer the task for longer still, and the

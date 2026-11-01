@@ -127,7 +127,7 @@ func oldestQueueAges(pools []*store.Pool, jobs []*store.Job, now time.Time) map[
 		if p == nil {
 			continue
 		}
-		if a := now.Sub(j.QueuedAt); a > oldest[p.ID] {
+		if a := j.QueuedAge(now); a > oldest[p.ID] {
 			oldest[p.ID] = a
 		}
 	}

@@ -11057,6 +11057,13 @@ export interface components {
             allocatable_memory_mb?: number;
             /** Format: int64 */
             allocatable_disk_mb?: number;
+            /**
+             * Format: int64
+             * @description The memory the scheduler may book on this host: `allocatable_memory_mb` times `memory_overcommit_percent`. Equal to it at 100. Only the booking reads it; a runner still starts only where its size and the reserve are measured free on the real host.
+             */
+            booking_memory_mb?: number;
+            /** @description The fleet's `scheduler.memory_overcommit_percent` this host is booked at. */
+            memory_overcommit_percent?: number;
             /** @description What the live runners already on this host have promised away, as of the last scheduling pass and from the snapshot that pass decided on. Disk is absent on purpose: free disk already contains what those runners have written, so charging their reservations too would count the same bytes twice. */
             reserved_cpus?: number;
             /** Format: int64 */

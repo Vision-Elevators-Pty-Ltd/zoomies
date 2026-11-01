@@ -118,6 +118,11 @@ const (
 // Every duration here is disabled by a zero or negative value, so a caller that
 // leaves a field unset gets "no timeout" instead of a fleet that reaps itself.
 type Policy struct {
+	// MemoryOvercommitPercent scales the memory each host may be booked for
+	// (scheduler.memory_overcommit_percent). 100, or anything at or below it,
+	// books the machine once. See newHostSetWith for what still reads the real
+	// machine.
+	MemoryOvercommitPercent int
 	// ScaleUpDelay is how long a job must have been queued before it counts as
 	// demand, which damps churn when jobs arrive in bursts.
 	ScaleUpDelay time.Duration
@@ -373,7 +378,7 @@ func Decide(s Snapshot) Plan {
 	t := &tick{
 		now:                s.Now,
 		policy:             s.Policy,
-		hosts:              newHostSet(s.Hosts, pools, s.Runners, s.Now),
+		hosts:              newHostSetWith(s.Hosts, pools, s.Runners, s.Now, s.Policy.MemoryOvercommitPercent),
 		budget:             s.Policy.MaxCreatesPerTick,
 		activeByRepository: s.ActiveByRepository,
 		poolCount:          len(pools),
@@ -576,7 +581,10 @@ func (t *tick) decidePool(p *store.Pool, runners []*store.Runner, queued []*stor
 		// read "3 jobs deferred by the repository limit for acme/widgets"
 		// about jobs the next few seconds were going to release anyway --
 		// and sent an operator to change a setting that was not the cause.
-		if !j.ProvisionNow && t.now.Sub(j.QueuedAt) < t.policy.For(p).ScaleUpDelay {
+		// A job queued in the future has waited for a time nobody can measure,
+		// not for none: holding it to the delay would hold it until GitHub's
+		// clock and ours agree, which is how a pool sat idle under a queue.
+		if !j.ProvisionNow && !j.QueuedInFuture(t.now) && j.QueuedAge(t.now) < t.policy.For(p).ScaleUpDelay {
 			continue
 		}
 		if p.RepositoryScaleUpLimit > 0 && t.activeByRepository[p.ID+"\x00"+j.Repo]+admitted[j.Repo] >= p.RepositoryScaleUpLimit {
@@ -942,7 +950,7 @@ func (t *tick) shareAcrossTiers(tiers []*store.Pool, byID map[string]*PoolPlan, 
 // least one reconcile interval, measured against the snapshot's time.
 func (t *tick) waitedAnInterval(queued []*store.Job) bool {
 	for _, j := range queued {
-		if !j.QueuedAt.IsZero() && t.now.Sub(j.QueuedAt) >= t.policy.Interval {
+		if !j.QueuedAt.IsZero() && (j.QueuedInFuture(t.now) || j.QueuedAge(t.now) >= t.policy.Interval) {
 			return true
 		}
 	}
@@ -1325,6 +1333,40 @@ type hostSet struct {
 // same bytes twice. It is charged only for the runners this pass adds, which
 // have written nothing yet.
 func newHostSet(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, now time.Time) *hostSet {
+	return newHostSetWith(hosts, pools, runners, now, 100)
+}
+
+// BookingMemoryMB is the memory a host may be booked for at an overcommit of
+// percent: its allocatable memory, scaled. Zero for a host that has not
+// reported its memory, which constrains nothing.
+func BookingMemoryMB(h *store.Host, percent int) int64 {
+	a := h.Allocatable()
+	if !a.MemoryKnown {
+		return 0
+	}
+	if percent <= 100 {
+		return a.MemoryMB
+	}
+	return a.MemoryMB * int64(percent) / 100
+}
+
+// newHostSetWith is newHostSet at a memory overcommit of overcommitPercent.
+//
+// Only the ledger is overcommitted: what is left to book on a host starts from
+// BookingMemoryMB rather than its allocatable memory. Everything that asks what
+// the machine really has is unchanged, and above 100 one of them is tightened:
+//
+//   - the measured check below takes the tighter of the ledger and the host's
+//     measured available memory, and with overcommit on it holds the host's
+//     reserve back from that measurement too, so a runner starts only where
+//     its size and the reserve are measured free;
+//   - a host with no fresh measurement is not overcommitted at all, because
+//     the measurement is what bounds the booking;
+//   - the idle-host path (memoryLeft) reads the real ledger, as before;
+//   - HostFits, the pressure holds (HostAdmissionReason), throttling and slot
+//     sizes read the host's real figures and never see the factor.
+func newHostSetWith(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, now time.Time, overcommitPercent int) *hostSet {
+	overcommit := overcommitPercent > 100
 	hs := &hostSet{
 		hosts:          sortedHosts(hosts),
 		free:           make(map[string]int, len(hosts)),
@@ -1361,6 +1403,10 @@ func newHostSet(hosts []*store.Host, pools []*store.Pool, runners map[string][]*
 			l.DiskMB -= t.reserved.DiskMB
 		}
 		hs.promisedMemory[h.ID] = l.MemoryMB
+		measured := h.Usage.Fresh(now) && h.Usage.MemoryAvailableMB != nil
+		if overcommit && measured {
+			l.MemoryMB = BookingMemoryMB(h, overcommitPercent) - t.reserved.MemoryMB
+		}
 		hs.ours[h.ID] = t.ours
 		if t.warming > 0 {
 			hs.warming[h.ID] += t.warming
@@ -1385,6 +1431,9 @@ func newHostSet(hosts []*store.Host, pools []*store.Pool, runners map[string][]*
 				// contain, then take the tighter of measured headroom and
 				// reservation headroom.
 				available := *v - pending.MemoryMB
+				if overcommit {
+					available -= h.MemoryReserve()
+				}
 				l.MemoryMB = min(l.MemoryMB, max(available, 0))
 			}
 			// CPU runners are using because it was lent them is not

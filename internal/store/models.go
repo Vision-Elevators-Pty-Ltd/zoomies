@@ -1152,6 +1152,21 @@ func (p *Pool) Dangerous() []string {
 	return out
 }
 
+// QueuedAge is how long j has been queued at now. A queued_at later than now
+// (GitHub's clock running ahead of ours) reads as now: zero, never negative.
+func (j *Job) QueuedAge(now time.Time) time.Duration {
+	if j == nil || j.QueuedAt.IsZero() || !now.After(j.QueuedAt) {
+		return 0
+	}
+	return now.Sub(j.QueuedAt)
+}
+
+// QueuedInFuture reports a queued_at later than now, which only a clock ahead
+// of ours can write. Such a job has waited an unknown time, not none.
+func (j *Job) QueuedInFuture(now time.Time) bool {
+	return j != nil && j.QueuedAt.After(now)
+}
+
 // Host is an agent process and the machine it runs on.
 type Host struct {
 	RecoveryRequired bool       `json:"-"`

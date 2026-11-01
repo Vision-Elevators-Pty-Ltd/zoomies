@@ -214,6 +214,13 @@ type HostView struct {
 	AllocatableCPUs     float64 `json:"allocatable_cpus,omitempty"`
 	AllocatableMemoryMB int64   `json:"allocatable_memory_mb,omitempty"`
 	AllocatableDiskMB   int64   `json:"allocatable_disk_mb,omitempty"`
+	// BookingMemoryMB is the memory the scheduler may book on this host, its
+	// allocatable memory times MemoryOvercommitPercent
+	// (scheduler.memory_overcommit_percent). It equals AllocatableMemoryMB at
+	// 100. Only the booking reads it: a runner still starts only where its
+	// size and the reserve are measured free on the real machine.
+	BookingMemoryMB         int64 `json:"booking_memory_mb,omitempty"`
+	MemoryOvercommitPercent int   `json:"memory_overcommit_percent,omitempty"`
 	// ReservedCPUs and ReservedMemoryMB are what the runners already on this
 	// host have promised away, as of the last scheduling pass and from the
 	// snapshot that pass decided on. Disk is deliberately absent: free disk is
@@ -392,6 +399,8 @@ func (c *Controller) HostView(h *store.Host) HostView {
 	out.AllocatableCPUs = alloc.CPUs
 	out.AllocatableMemoryMB = alloc.MemoryMB
 	out.AllocatableDiskMB = alloc.DiskMB
+	out.MemoryOvercommitPercent = max(c.cfg().Scheduler.MemoryOvercommitPercent, 100)
+	out.BookingMemoryMB = scheduler.BookingMemoryMB(h, out.MemoryOvercommitPercent)
 	out.ResourcesKnown = alloc.CPUsKnown || alloc.MemoryKnown || alloc.DiskKnown
 	if res, ok := c.reservedOn(h.ID); ok {
 		out.ReservedCPUs = res.CPUs

@@ -439,6 +439,7 @@ func (c *Controller) applyWorkflowJob(ctx context.Context, e *github.WorkflowJob
 		}
 	}
 
+	heldToArrival(job, c.Now())
 	saved, change, err := c.st.ApplyJob(ctx, job)
 	if err != nil {
 		return fmt.Errorf("recording job %d: %w", e.JobID, err)

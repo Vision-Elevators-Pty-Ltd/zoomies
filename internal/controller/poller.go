@@ -263,6 +263,7 @@ func (c *Controller) ingestQueuedJobsWith(ctx context.Context, polled *store.Ins
 			job.PoolID = p.ID
 			job.Matched = true
 		}
+		heldToArrival(job, c.Now())
 		saved, change, err := c.st.ApplyJob(ctx, job)
 		if err != nil {
 			c.log.Warn("could not record a polled job", "github_job_id", q.ID, "error", err)

@@ -568,7 +568,7 @@ func (f *fleetCollector) Collect(ch chan<- prometheus.Metric) {
 		if j.QueuedAt.IsZero() {
 			continue
 		}
-		if age := now.Sub(j.QueuedAt).Seconds(); age > oldestByPool[j.PoolID] {
+		if age := j.QueuedAge(now).Seconds(); age > oldestByPool[j.PoolID] {
 			oldestByPool[j.PoolID] = age
 		}
 	}

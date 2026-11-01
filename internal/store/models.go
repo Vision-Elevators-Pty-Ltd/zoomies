@@ -557,6 +557,45 @@ type Resources struct {
 	DaemonSharePercent       int `json:"daemon_share_percent,omitempty"`
 	DaemonCPUSharePercent    int `json:"daemon_cpu_share_percent,omitempty"`
 	DaemonMemorySharePercent int `json:"daemon_memory_share_percent,omitempty"`
+	// DinDSharedLimit holds a docker-in-docker runner and its sidecar to the
+	// typed CPUs and memory between them, instead of giving each container the
+	// whole figure. The two are placed under one parent cgroup limited to the
+	// typed size, each keeps a limit of its own no higher than it, and the host
+	// is charged the typed size once rather than twice.
+	//
+	// It exists for pools whose jobs use their memory in one container or the
+	// other (a type check in the runner, an image build in the daemon) and
+	// rarely in both at once: charging both halves in full leaves half of every
+	// booking empty, and a fleet holds half the heavy jobs it could. Off is the
+	// upstream behaviour. It has no effect on a field the host sized, which is
+	// one slot the pair already splits.
+	DinDSharedLimit bool `json:"dind_shared_limit,omitempty"`
+}
+
+// FeatureDinDSharedLimit is advertised by an agent that can put a
+// docker-in-docker pair under one parent cgroup holding the pool's typed size
+// (Resources.DinDSharedLimit). It is named here, not beside the agent's other
+// features, because the scheduler reads it: a host whose agent predates it
+// gives each container the whole figure, and is charged for both.
+const FeatureDinDSharedLimit = "dind-shared-limit"
+
+// SharesPairLimit reports whether a runner of p on h holds its typed size once
+// between the runner and its docker-in-docker sidecar. A nil host reads the
+// pool alone, for a figure that names no machine.
+func (p *Pool) SharesPairLimit(h *Host) bool {
+	return p != nil && p.DockerMode == DockerDinD && p.Resources.DinDSharedLimit &&
+		(h == nil || h.Supports(FeatureDinDSharedLimit))
+}
+
+// TypedPairFactor is how many times a field the operator typed is charged for
+// one runner of p on h: two for a docker-in-docker pair that gives each
+// container the whole figure, and one for every other runner, a shared pair
+// included.
+func (p *Pool) TypedPairFactor(h *Host) int {
+	if p != nil && p.DockerMode == DockerDinD && !p.SharesPairLimit(h) {
+		return 2
+	}
+	return 1
 }
 
 const (

@@ -381,6 +381,9 @@ type DockerBackend struct {
 	// Podman embeds this backend and inherits it.
 	abandonedMu sync.Mutex
 	abandoned   map[string]time.Time
+	// sharedSlices is the slice manager a shared-limit pair is limited through.
+	// Nil finds it from the daemon on each create (defaultSlices); a test sets it.
+	sharedSlices sliceLimiter
 }
 
 var _ Backend = (*DockerBackend)(nil)
@@ -586,6 +589,9 @@ type containerOptions struct {
 	// ToolFarmDir is the host folder holding this runner's own tool cache,
 	// bound at RunnerToolCacheMount; it is set whenever ToolCacheDir is.
 	ToolFarmDir string
+	// SharedSlice is the systemd slice a shared-limit docker-in-docker pair is
+	// created under, both halves of it; empty for every other runner.
+	SharedSlice string
 }
 
 // extraCABind is the read-only mount for the extra CA bundle. The Podman
@@ -650,6 +656,9 @@ func buildRunnerConfig(spec Spec, fl flavor, o containerOptions) ContainerCreate
 		runnerRes, _ = pairLimits(spec)
 	}
 	stampResourceLabels(labels, spec, runnerRes)
+	if o.SharedSlice != "" {
+		labels[LabelSharedSlice] = o.SharedSlice
+	}
 
 	cfg := ContainerCreateRequest{
 		Image: spec.Image,
@@ -692,6 +701,7 @@ func buildRunnerConfig(spec Spec, fl flavor, o containerOptions) ContainerCreate
 	}
 
 	hc := cfg.HostConfig
+	hc.CgroupParent = o.SharedSlice
 	res := runnerRes
 	if res.CPUs > 0 {
 		hc.NanoCPUs = nanoCPUs(res.CPUs)
@@ -833,6 +843,9 @@ func buildDinDConfig(spec Spec, fl flavor, o containerOptions) ContainerCreateRe
 	labels[LabelName] = dindName(spec.Name)
 	_, daemonRes := pairLimits(spec)
 	stampResourceLabels(labels, spec, daemonRes)
+	if o.SharedSlice != "" {
+		labels[LabelSharedSlice] = o.SharedSlice
+	}
 
 	cfg := ContainerCreateRequest{
 		Image: o.DinDImage,
@@ -859,6 +872,9 @@ func buildDinDConfig(spec Spec, fl flavor, o containerOptions) ContainerCreateRe
 	// not the runner, so a pool's memory, CPU and pids limits are worth nothing
 	// unless they bind the sidecar too.
 	hc := cfg.HostConfig
+	// A shared limit is this slice: the sidecar and the runner beside it are
+	// held to the pool's size between them, and each still to it on its own.
+	hc.CgroupParent = o.SharedSlice
 	res := daemonRes
 	if res.CPUs > 0 {
 		hc.NanoCPUs = nanoCPUs(res.CPUs)
@@ -1316,6 +1332,12 @@ func (b *DockerBackend) CreateWithResult(ctx context.Context, spec Spec) (result
 			if err := b.cleanupFailedCreate(ctx, spec, createErr, dindID, workDir, owned); err != nil {
 				createErr = errors.Join(createErr, err)
 			}
+			// After the containers, so the slice is let go empty. A conflict
+			// over the name leaves a contested occupant, which may be the same
+			// runner's own pair under this slice; it keeps it.
+			if opts.SharedSlice != "" && !errors.Is(createErr, ErrContainerConflict) {
+				b.releaseSharedSlice(ctx, opts.SharedSlice)
+			}
 			if opts.ToolFarmDir != "" {
 				if err := os.RemoveAll(opts.ToolFarmDir); err != nil {
 					createErr = errors.Join(createErr, fmt.Errorf("cleaning failed runner tool cache: %w", err))
@@ -1335,6 +1357,13 @@ func (b *DockerBackend) CreateWithResult(ctx context.Context, spec Spec) (result
 	case store.DockerDinD:
 		if _, err := b.ensureImage(ctx, dindImage); err != nil {
 			return CreateResult{}, err
+		}
+		if spec.DinDSharedLimit {
+			unit, err := b.limitSharedSlice(ctx, spec)
+			if err != nil {
+				return CreateResult{}, err
+			}
+			opts.SharedSlice = unit
 		}
 		if vol, err := b.ensureExternalsVolume(ctx, requested, spec.Image, digest); err != nil {
 			b.log.Warn("could not share the runner's externals with the docker-in-docker sidecar; jobs in a container: block will fail", "runner", spec.Name, "image", spec.Image, "error", err)
@@ -2003,7 +2032,7 @@ func (b *DockerBackend) Stop(ctx context.Context, h Handle, timeout time.Duratio
 // Remove tears down the runner, its docker-in-docker sidecar and any scratch
 // directory Zoomies created for it. Removing what is already gone is success.
 func (b *DockerBackend) Remove(ctx context.Context, h Handle) error {
-	var name, workDir, toolFarm string
+	var name, workDir, toolFarm, sharedSlice string
 	insp, err := b.api.ContainerInspect(ctx, string(h))
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return fmt.Errorf("backend: inspecting container before removal: %w", err)
@@ -2012,6 +2041,7 @@ func (b *DockerBackend) Remove(ctx context.Context, h Handle) error {
 		name = insp.Config.Labels[LabelName]
 		workDir = insp.Config.Labels[LabelWorkDir]
 		toolFarm = insp.Config.Labels[LabelToolFarm]
+		sharedSlice = insp.Config.Labels[LabelSharedSlice]
 	}
 
 	if name != "" {
@@ -2042,6 +2072,8 @@ func (b *DockerBackend) Remove(ctx context.Context, h Handle) error {
 	if err := b.removeContainer(ctx, string(h)); err != nil && !errors.Is(err, ErrNotFound) {
 		return fmt.Errorf("backend: removing container %s: %w", shortID(string(h)), err)
 	}
+	// Last, with both halves of the pair gone, so the slice is let go empty.
+	b.releaseSharedSlice(ctx, sharedSlice)
 	// Removed by us is seen through: a create of either name that the daemon
 	// was slow to finish has nothing left to finish.
 	if name != "" {

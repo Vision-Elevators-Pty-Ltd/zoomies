@@ -1453,7 +1453,7 @@ func (hs *hostSet) placeAvoiding(p *store.Pool, n int, avoid map[string]bool) []
 		raised := false
 		if hs.need != nil {
 			before := size
-			res, size = sizeForNeed(p, res, size, *hs.need)
+			res, size = sizeForNeed(p, h, res, size, *hs.need)
 			raised = size != before
 		}
 		hs.free[h.ID]--

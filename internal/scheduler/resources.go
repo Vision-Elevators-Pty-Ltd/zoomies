@@ -126,12 +126,15 @@ func Reserve(p *store.Pool, h *store.Host) Reservation {
 	}
 	if p.DockerMode == store.DockerDinD {
 		// Only what the operator typed doubles. A share is one slot, and the
-		// pair is given one slot between them.
+		// pair is given one slot between them. A pool that holds its pair to
+		// the typed size between them (SharesPairLimit) is charged it once,
+		// because that is all its parent cgroup lets the two use together.
+		factor := p.TypedPairFactor(h)
 		if !cpuFromHost {
-			res.CPUs *= 2
+			res.CPUs *= float64(factor)
 		}
 		if !memoryFromHost {
-			res.MemoryMB *= 2
+			res.MemoryMB *= int64(factor)
 		}
 		// The default working room is one per pair, like a share: the pair
 		// works in one directory. Only a typed figure doubles.
@@ -181,7 +184,7 @@ func RunnerGuarantee(p *store.Pool, h *store.Host, r *store.Runner) Reservation 
 	}
 	reduced := r.AllocationSource == store.AllocationReduced || r.AllocationSource == store.AllocationHistory
 	if r.AllocatedCPUs > 0 {
-		given := r.AllocatedCPUs * fieldFactor(p, p.Resources.CPUs > 0)
+		given := r.AllocatedCPUs * fieldFactor(p, h, p.Resources.CPUs > 0)
 		if reduced {
 			res.CPUs = given
 		} else {
@@ -189,7 +192,7 @@ func RunnerGuarantee(p *store.Pool, h *store.Host, r *store.Runner) Reservation 
 		}
 	}
 	if r.AllocatedMemoryMB > 0 {
-		given := r.AllocatedMemoryMB * int64(fieldFactor(p, p.Resources.MemoryMB > 0))
+		given := r.AllocatedMemoryMB * int64(fieldFactor(p, h, p.Resources.MemoryMB > 0))
 		if reduced {
 			res.MemoryMB = given
 		} else {
@@ -202,10 +205,11 @@ func RunnerGuarantee(p *store.Pool, h *store.Host, r *store.Runner) Reservation 
 // fieldFactor is how many containers one field of a runner's size is given
 // for: two for a docker-in-docker runner's typed figure, because the daemon is
 // given the same limit, and one for a field taken from the host, which is one
-// slot the pair shares -- the same distinction Reserve draws.
-func fieldFactor(p *store.Pool, typed bool) float64 {
-	if typed && p.DockerMode == store.DockerDinD {
-		return 2
+// slot the pair shares: the same distinction Reserve draws. A pair held to
+// its typed size between them (store.Pool.SharesPairLimit) is one as well.
+func fieldFactor(p *store.Pool, h *store.Host, typed bool) float64 {
+	if typed {
+		return float64(p.TypedPairFactor(h))
 	}
 	return 1
 }
@@ -229,7 +233,7 @@ func MinimumReserve(p *store.Pool, h *store.Host) Reservation {
 	floor := ShareFloor(p)
 	if m := p.Resources.MinCPUs; m > 0 {
 		typed := p.Resources.CPUs > 0
-		v := m * fieldFactor(p, typed)
+		v := m * fieldFactor(p, h, typed)
 		if !typed {
 			v = max(v, floor.CPUs)
 		}
@@ -237,7 +241,7 @@ func MinimumReserve(p *store.Pool, h *store.Host) Reservation {
 	}
 	if m := p.Resources.MinMemoryMB; m > 0 {
 		typed := p.Resources.MemoryMB > 0
-		v := m * int64(fieldFactor(p, typed))
+		v := m * int64(fieldFactor(p, h, typed))
 		if !typed {
 			v = max(v, floor.MemoryMB)
 		}
@@ -268,8 +272,8 @@ func ReducedSize(p *store.Pool, h *store.Host, left Reservation, known store.Hos
 		return Reservation{}, store.Resources{}, false
 	}
 	charge := Reserve(p, h)
-	cpuFactor := fieldFactor(p, p.Resources.CPUs > 0)
-	memFactor := int64(fieldFactor(p, p.Resources.MemoryMB > 0))
+	cpuFactor := fieldFactor(p, h, p.Resources.CPUs > 0)
+	memFactor := int64(fieldFactor(p, h, p.Resources.MemoryMB > 0))
 	if known.CPUsKnown && left.CPUs+cpuEpsilon < charge.CPUs && floor.CPUs < charge.CPUs {
 		each := math.Floor(left.CPUs/cpuFactor*100+cpuEpsilon) / 100
 		charge.CPUs = max(each*cpuFactor, floor.CPUs)
@@ -752,7 +756,10 @@ func HostShortfall(h *store.Host, p *store.Pool) string {
 	if fits(left, want, alloc) {
 		return ""
 	}
+	// Disk doubles for every typed pair; CPU and memory not for one that holds
+	// the pair to its size between them.
 	dind := p.DockerMode == store.DockerDinD
+	doubled := p.TypedPairFactor(h) == 2
 	switch {
 	case alloc.DiskKnown && alloc.DiskMB <= 0:
 		// The reserve floor, not a limit anyone typed. Sending an operator to
@@ -764,10 +771,10 @@ func HostShortfall(h *store.Host, p *store.Pool) string {
 			formatMB(left.DiskMB), formatMB(want.DiskMB), charged(p.Resources.DiskGB > 0, dind)+workingRoomCharged(p))
 	case alloc.CPUsKnown && left.CPUs+cpuEpsilon < want.CPUs:
 		return fmt.Sprintf("it has %s CPU to place on, and one runner of this pool is charged %s%s",
-			formatCPUs(left.CPUs), formatCPUs(want.CPUs), charged(p.Resources.CPUs > 0, dind)+minimumCharged(p, "cpu"))
+			formatCPUs(left.CPUs), formatCPUs(want.CPUs), charged(p.Resources.CPUs > 0, doubled)+minimumCharged(p, "cpu"))
 	case alloc.MemoryKnown && left.MemoryMB < want.MemoryMB:
 		return fmt.Sprintf("it has %s of memory to place on, and one runner of this pool is charged %s%s",
-			formatMB(left.MemoryMB), formatMB(want.MemoryMB), charged(p.Resources.MemoryMB > 0, dind)+minimumCharged(p, "memory"))
+			formatMB(left.MemoryMB), formatMB(want.MemoryMB), charged(p.Resources.MemoryMB > 0, doubled)+minimumCharged(p, "memory"))
 	}
 	return "it is too small for this pool's limits"
 }

@@ -212,7 +212,7 @@ func (c *Controller) elasticMemoryDirective(ctx context.Context, h *store.Host, 
 		// not the first, and it is the first that is at risk and that a loan is
 		// on top of.
 		guarantee := scheduler.RunnerGuarantee(p, h, r).MemoryMB
-		if launched, ok := scheduler.LaunchedMemoryMB(p, r); ok {
+		if launched, ok := scheduler.LaunchedMemoryMB(p, h, r); ok {
 			guarantee = launched
 		}
 		lent := r.LentMemoryMB
@@ -496,7 +496,7 @@ func memoryValveEpilogue(p *store.Pool, r *store.Runner) string {
 		// All of what it was created with, which for a typed docker-in-docker pair
 		// is both containers' and not the one figure on the row.
 		created := r.AllocatedMemoryMB
-		if launched, ok := scheduler.LaunchedMemoryMB(p, r); ok {
+		if launched, ok := scheduler.LaunchedMemoryMB(p, nil, r); ok {
 			created = launched
 		}
 		out := fmt.Sprintf(" The memory valve had lent it %s on top of its %s, so it held %s when it was killed",

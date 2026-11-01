@@ -586,6 +586,7 @@ func (c *Controller) finishCreateRunner(ctx context.Context, inst *store.Install
 		DaemonSharePercent:       pool.Resources.DaemonSharePercent,
 		DaemonCPUSharePercent:    pool.Resources.DaemonCPUSharePercent,
 		DaemonMemorySharePercent: pool.Resources.DaemonMemorySharePercent,
+		DinDSharedLimit:          pool.DockerMode == store.DockerDinD && pool.Resources.DinDSharedLimit,
 		// An organisation installation's target is the organisation, which is
 		// no repository at all; a pool under one names its cache's repository
 		// itself, and that is the identity the runner should carry.

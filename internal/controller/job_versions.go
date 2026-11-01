@@ -118,7 +118,9 @@ func (c *Controller) stampJobGranted(ctx context.Context, j *store.Job, runner *
 // part of it: this is the guarantee, which is what two jobs can be compared by.
 func grantedSize(p *store.Pool, r *store.Runner) (cpus float64, memoryMB int64) {
 	cpus, memoryMB = r.AllocatedCPUs, r.AllocatedMemoryMB
-	if p == nil || p.DockerMode != store.DockerDinD {
+	// A pair held to its typed size between them was given it once. The host
+	// is not to hand here, so the pool's word is taken for it.
+	if p == nil || p.DockerMode != store.DockerDinD || p.SharesPairLimit(nil) {
 		return cpus, memoryMB
 	}
 	if typedAllocation(r, p.Resources.CPUs > 0) {

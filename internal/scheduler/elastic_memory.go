@@ -33,13 +33,15 @@ const MemoryPoolSafetyShare = 0.05
 // A docker-in-docker runner's typed size is per container, so the pair holds
 // twice it; a size taken from the host is one slot the pair splits, so it holds
 // it once. That is the distinction Reserve draws, read from how the runner was
-// sized rather than from how the pool is sized now.
-func LaunchedMemoryMB(p *store.Pool, r *store.Runner) (int64, bool) {
+// sized rather than from how the pool is sized now. A pair held to its typed
+// size between them (store.Pool.SharesPairLimit) holds it once; a nil host
+// reads that from the pool alone.
+func LaunchedMemoryMB(p *store.Pool, h *store.Host, r *store.Runner) (int64, bool) {
 	if p == nil || r == nil || r.AllocatedMemoryMB <= 0 {
 		return 0, false
 	}
 	mb := r.AllocatedMemoryMB
-	if p.DockerMode == store.DockerDinD && (r.AllocationSource == store.AllocationFromPool ||
+	if p.DockerMode == store.DockerDinD && !p.SharesPairLimit(h) && (r.AllocationSource == store.AllocationFromPool ||
 		((r.AllocationSource == store.AllocationReduced || r.AllocationSource == store.AllocationHistory) && p.Resources.MemoryMB > 0)) {
 		mb *= 2
 	}

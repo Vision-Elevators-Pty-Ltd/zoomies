@@ -65,7 +65,7 @@ func TestAGuaranteeIsReadFromTheRunnerNotFromThePoolAsItIsNow(t *testing.T) {
 		{"a runner with no recorded size has none", typed, &store.Runner{}, 0, false},
 		{"no pool, no answer", nil, &store.Runner{AllocatedMemoryMB: 4096}, 0, false},
 	} {
-		got, ok := LaunchedMemoryMB(tc.pool, tc.runner)
+		got, ok := LaunchedMemoryMB(tc.pool, nil, tc.runner)
 		if got != tc.want || ok != tc.ok {
 			t.Errorf("%s: %d, %v; want %d, %v", tc.name, got, ok, tc.want, tc.ok)
 		}

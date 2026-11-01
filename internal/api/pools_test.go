@@ -231,6 +231,22 @@ func TestPoolValidationNamesTheField(t *testing.T) {
 			b["docker_mode"] = "dind"
 			b["resources"] = map[string]any{"daemon_share_percent": 97}
 		}, "resources.daemon_share_percent", "between 10 and 90"},
+		// A shared limit is a parent cgroup over a runner and its sidecar at the
+		// typed size: it needs both a sidecar and a typed size, and it would cap
+		// every loan the memory valve made.
+		{"a shared limit on a pool with no sidecar", func(b map[string]any) {
+			b["docker_mode"] = "none"
+			b["resources"] = map[string]any{"memory_mb": 8192, "dind_shared_limit": true}
+		}, "resources.dind_shared_limit", "docker_mode dind"},
+		{"a shared limit with nothing typed to share", func(b map[string]any) {
+			b["docker_mode"] = "dind"
+			b["resources"] = map[string]any{"dind_shared_limit": true}
+		}, "resources.dind_shared_limit", "resources.memory_mb"},
+		{"a shared limit beside the memory valve", func(b map[string]any) {
+			b["docker_mode"] = "dind"
+			b["resources"] = map[string]any{"memory_mb": 8192, "dind_shared_limit": true}
+			b["memory_burst"] = map[string]any{"mode": "automatic"}
+		}, "resources.dind_shared_limit", "memory_burst.mode"},
 		{"folders that take the whole memory limit", func(b map[string]any) {
 			b["resources"] = map[string]any{"cpus": 2, "memory_mb": 4096}
 			b["tmpfs"] = map[string]any{"work": map[string]any{"enabled": true, "size_mb": 4096}}
@@ -1743,5 +1759,44 @@ func TestAPoolsSidecarImageIsSetReadBackAndCleared(t *testing.T) {
 	cleared.mustStatus(t, http.StatusOK, "clear")
 	if stored, err := h.st.GetPool(h.ctx, pool.ID); err != nil || stored.DinDImage != "" {
 		t.Fatalf("a cleared dind image = %v, %v", stored, err)
+	}
+}
+
+// The shared limit is a field of resources, so it is kept with them, read back
+// on the pool, and turned on or off by a PATCH that sends the pool's resources.
+func TestADockerInDockerPoolKeepsItsSharedLimit(t *testing.T) {
+	h := newHarness(t)
+	inst := h.installation()
+	h.host("vm-1")
+	u, _ := h.user("operator", store.RoleOperator)
+	cookie := h.session(u)
+
+	body := poolBody(inst.ID)
+	body["docker_mode"] = "dind"
+	body["resources"] = map[string]any{"cpus": 4, "memory_mb": 8192}
+	created := h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body})
+	created.mustStatus(t, http.StatusCreated, "create")
+	var pool poolResponse
+	created.into(t, &pool)
+	if pool.Resources.DinDSharedLimit {
+		t.Fatal("a pool that did not ask for a shared limit has one")
+	}
+
+	patched := h.do(request{method: http.MethodPatch, path: "/api/v1/pools/" + pool.ID, cookie: cookie,
+		body: map[string]any{"resources": map[string]any{"cpus": 4, "memory_mb": 8192, "dind_shared_limit": true}}})
+	patched.mustStatus(t, http.StatusOK, "patch")
+	stored, err := h.st.GetPool(h.ctx, pool.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.Resources.DinDSharedLimit || stored.Resources.MemoryMB != 8192 || stored.Resources.CPUs != 4 {
+		t.Fatalf("stored resources = %+v; want the shared limit kept beside the typed size", stored.Resources)
+	}
+	got := h.do(request{method: http.MethodGet, path: "/api/v1/pools/" + pool.ID, cookie: cookie})
+	got.mustStatus(t, http.StatusOK, "get")
+	var read poolResponse
+	got.into(t, &read)
+	if !read.Resources.DinDSharedLimit {
+		t.Fatal("the pool's view does not carry the shared limit")
 	}
 }

@@ -1026,14 +1026,15 @@ func (c *Config) validateScheduler(add func(Finding)) {
 			Fix:   "use 1 to re-run a broken run once, or turn scheduler.auto_rerun off.",
 		})
 	}
-	if c.Scheduler.MemoryOvercommitPercent < 100 || c.Scheduler.MemoryOvercommitPercent > 300 {
+	if c.Scheduler.MemoryOvercommitPercent < 100 || c.Scheduler.MemoryOvercommitPercent > 1000 {
 		// Below 100 would book less than the machine, which the reserve already
-		// does with a name; past 300 the booking says nothing about the machine
-		// and the measured check is doing all of the work.
+		// does with a name; past 1000 the booking says nothing about the machine.
+		// High values hand the decision to the measured check (real free memory,
+		// reserve) and the 85% real-CPU hold - a fill-to-target mode.
 		add(Finding{
 			Code: "scheduler.memory_overcommit_percent", Severity: SeverityError, Setting: "scheduler.memory_overcommit_percent",
-			Title: "memory_overcommit_percent must be between 100 and 300",
-			Fix:   "use 100 to book each host's memory once, or up to 300 to book it three times over.",
+			Title: "memory_overcommit_percent must be between 100 and 1000",
+			Fix:   "use 100 to book each host's memory once, or up to 1000 to let the measured check decide.",
 		})
 	} else if c.Scheduler.MemoryOvercommitPercent > 100 {
 		add(Finding{
@@ -1043,11 +1044,11 @@ func (c *Config) validateScheduler(add func(Finding)) {
 			Fix:    "set scheduler.memory_overcommit_percent back to 100 to book each host's memory once.",
 		})
 	}
-	if c.Scheduler.CPUOvercommitPercent < 100 || c.Scheduler.CPUOvercommitPercent > 400 {
+	if c.Scheduler.CPUOvercommitPercent < 100 || c.Scheduler.CPUOvercommitPercent > 800 {
 		add(Finding{
 			Code: "scheduler.cpu_overcommit_percent", Severity: SeverityError, Setting: "scheduler.cpu_overcommit_percent",
-			Title: "cpu_overcommit_percent must be between 100 and 400",
-			Fix:   "use 100 to book each host's CPUs once, or up to 400 to book them four times over.",
+			Title: "cpu_overcommit_percent must be between 100 and 800",
+			Fix:   "use 100 to book each host's CPUs once, or up to 800 to let the 85% real-CPU hold decide.",
 		})
 	} else if c.Scheduler.CPUOvercommitPercent > 100 {
 		add(Finding{

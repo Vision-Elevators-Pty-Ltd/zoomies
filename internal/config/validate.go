@@ -1043,6 +1043,20 @@ func (c *Config) validateScheduler(add func(Finding)) {
 			Fix:    "set scheduler.memory_overcommit_percent back to 100 to book each host's memory once.",
 		})
 	}
+	if c.Scheduler.CPUOvercommitPercent < 100 || c.Scheduler.CPUOvercommitPercent > 400 {
+		add(Finding{
+			Code: "scheduler.cpu_overcommit_percent", Severity: SeverityError, Setting: "scheduler.cpu_overcommit_percent",
+			Title: "cpu_overcommit_percent must be between 100 and 400",
+			Fix:   "use 100 to book each host's CPUs once, or up to 400 to book them four times over.",
+		})
+	} else if c.Scheduler.CPUOvercommitPercent > 100 {
+		add(Finding{
+			Code: "scheduler.cpu_overcommit_on", Severity: SeverityWarning, Setting: "scheduler.cpu_overcommit_percent",
+			Title:  "hosts' CPUs are booked more than once",
+			Detail: fmt.Sprintf("the scheduler books up to %d%% of each host's allocatable CPU. Each runner keeps its own quota and new starts are held at 85%% real CPU, but runners already placed share the cores when they are busy at once, and each job runs slower than its size says.", c.Scheduler.CPUOvercommitPercent),
+			Fix:    "set scheduler.cpu_overcommit_percent back to 100 to book each host's CPUs once.",
+		})
+	}
 	// A runner's start is bounded three times over, and this is the only one
 	// that gives up: the agent allows itself RunnerCreateBudget for the create,
 	// the controller will not re-offer the task for longer still, and the

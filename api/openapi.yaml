@@ -15429,6 +15429,17 @@ components:
           minimum: 100
           maximum: 300
           description: The fleet's `scheduler.memory_overcommit_percent` this host is booked at.
+        booking_cpus:
+          type: number
+          description: >-
+            The CPUs the scheduler may book on this host: `allocatable_cpus` times
+            `cpu_overcommit_percent`. Equal to it at 100. Runners keep their real CPU quotas, and
+            new starts are still held when the host's real CPU is at 85% or more.
+        cpu_overcommit_percent:
+          type: integer
+          minimum: 100
+          maximum: 400
+          description: The fleet's `scheduler.cpu_overcommit_percent` this host is booked at.
         reserved_cpus:
           type: number
           description: >-

@@ -1084,6 +1084,7 @@ func (c *Controller) policy() scheduler.Policy {
 		// The policy is built from the live settings on every pass, so a change
 		// on the Settings page is in the next pass's booking.
 		MemoryOvercommitPercent: c.cfg().Scheduler.MemoryOvercommitPercent,
+		CPUOvercommitPercent:    c.cfg().Scheduler.CPUOvercommitPercent,
 		MaxRunnerLifetime:       c.cfg().Scheduler.MaxRunnerLifetime,
 		ProvisionTimeout:        c.cfg().Scheduler.ProvisionTimeout,
 		DrainTimeout:            c.cfg().Scheduler.DrainTimeout,

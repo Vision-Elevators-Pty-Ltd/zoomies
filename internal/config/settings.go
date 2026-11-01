@@ -716,6 +716,10 @@ var registry = buildRegistry([]Setting{
 		Summary: "How many times one workflow run may be re-run automatically (1-5), counted from GitHub's own run attempt. It bounds a fault the fleet causes every time.",
 	},
 	{
+		Key: "scheduler.cpu_overcommit_percent", Label: "CPU overcommit", Env: "ZOOMIES_CPU_OVERCOMMIT_PERCENT", Kind: KindInt, Scope: ScopeInstance, Live: true,
+		Summary: "How much of each host's allocatable CPU may be booked, in percent (100-400). 100 books the machine once. Runners keep their real CPU quotas, and new starts are still held when the host's real CPU is at 85% or more.",
+	},
+	{
 		Key: "scheduler.memory_overcommit_percent", Label: "Memory overcommit", Env: "ZOOMIES_MEMORY_OVERCOMMIT_PERCENT", Kind: KindInt, Scope: ScopeInstance, Live: true,
 		Summary: "How much of each host's allocatable memory may be booked, in percent (100-300). 100 books the machine once. Above it, a runner still starts only where its size and the reserve are measured free on the real host, and containers keep their real limits.",
 	},

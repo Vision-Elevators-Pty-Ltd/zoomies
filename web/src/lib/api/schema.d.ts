@@ -11064,6 +11064,10 @@ export interface components {
             booking_memory_mb?: number;
             /** @description The fleet's `scheduler.memory_overcommit_percent` this host is booked at. */
             memory_overcommit_percent?: number;
+            /** @description The CPUs the scheduler may book on this host: `allocatable_cpus` times `cpu_overcommit_percent`. Equal to it at 100. Runners keep their real CPU quotas, and new starts are still held when the host's real CPU is at 85% or more. */
+            booking_cpus?: number;
+            /** @description The fleet's `scheduler.cpu_overcommit_percent` this host is booked at. */
+            cpu_overcommit_percent?: number;
             /** @description What the live runners already on this host have promised away, as of the last scheduling pass and from the snapshot that pass decided on. Disk is absent on purpose: free disk already contains what those runners have written, so charging their reservations too would count the same bytes twice. */
             reserved_cpus?: number;
             /** Format: int64 */

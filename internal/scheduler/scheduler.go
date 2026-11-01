@@ -123,6 +123,9 @@ type Policy struct {
 	// books the machine once. See newHostSetWith for what still reads the real
 	// machine.
 	MemoryOvercommitPercent int
+	// CPUOvercommitPercent is the same for CPU (scheduler.cpu_overcommit_percent):
+	// it scales the CPUs each host may be booked for, never a quota.
+	CPUOvercommitPercent int
 	// ScaleUpDelay is how long a job must have been queued before it counts as
 	// demand, which damps churn when jobs arrive in bursts.
 	ScaleUpDelay time.Duration
@@ -378,7 +381,7 @@ func Decide(s Snapshot) Plan {
 	t := &tick{
 		now:                s.Now,
 		policy:             s.Policy,
-		hosts:              newHostSetWith(s.Hosts, pools, s.Runners, s.Now, s.Policy.MemoryOvercommitPercent),
+		hosts:              newHostSetOvercommitted(s.Hosts, pools, s.Runners, s.Now, s.Policy.MemoryOvercommitPercent, s.Policy.CPUOvercommitPercent),
 		budget:             s.Policy.MaxCreatesPerTick,
 		activeByRepository: s.ActiveByRepository,
 		poolCount:          len(pools),
@@ -1312,6 +1315,9 @@ type hostSet struct {
 	promisedMemory map[string]int64
 	ours           map[string]bool
 	now            time.Time
+	// cpuOvercommit says CPU is booked past the machine
+	// (Policy.CPUOvercommitPercent above 100); see cpuPressureHolds.
+	cpuOvercommit bool
 	// order is scheduler.host_order; see Snapshot.HostOrder.
 	order string
 	// need is set while a runner is being placed for a known requirement
@@ -1366,8 +1372,36 @@ func BookingMemoryMB(h *store.Host, percent int) int64 {
 //   - HostFits, the pressure holds (HostAdmissionReason), throttling and slot
 //     sizes read the host's real figures and never see the factor.
 func newHostSetWith(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, now time.Time, overcommitPercent int) *hostSet {
+	return newHostSetOvercommitted(hosts, pools, runners, now, overcommitPercent, 100)
+}
+
+// BookingCPUs is the CPU a host may be booked for at an overcommit of percent:
+// its allocatable CPUs, scaled. Zero for a host that has not reported its CPUs.
+func BookingCPUs(h *store.Host, percent int) float64 {
+	a := h.Allocatable()
+	if !a.CPUsKnown {
+		return 0
+	}
+	if percent <= 100 {
+		return a.CPUs
+	}
+	return a.CPUs * float64(percent) / 100
+}
+
+// newHostSetOvercommitted is newHostSetWith with CPU overcommitted as well.
+//
+// CPU is booked from BookingCPUs, and only booked: every runner keeps the
+// cpu.max quota its size gives it, and what holds a busy machine is unchanged
+// and reads the real one. The 85% admission hold and the sustained-pressure
+// hold (HostAdmissionReason), host throttling on load and CPU, and HostFits
+// all see the host's real CPUs, as do the measured free CPUs the score ranks
+// hosts by. A host with no fresh CPU sample is booked once: nothing would
+// notice it was full.
+func newHostSetOvercommitted(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, now time.Time, overcommitPercent, cpuOvercommitPercent int) *hostSet {
 	overcommit := overcommitPercent > 100
+	cpuOvercommit := cpuOvercommitPercent > 100
 	hs := &hostSet{
+		cpuOvercommit:  cpuOvercommit,
 		hosts:          sortedHosts(hosts),
 		free:           make(map[string]int, len(hosts)),
 		observedCPU:    make(map[string]float64, len(hosts)),
@@ -1406,6 +1440,9 @@ func newHostSetWith(hosts []*store.Host, pools []*store.Pool, runners map[string
 		measured := h.Usage.Fresh(now) && h.Usage.MemoryAvailableMB != nil
 		if overcommit && measured {
 			l.MemoryMB = BookingMemoryMB(h, overcommitPercent) - t.reserved.MemoryMB
+		}
+		if cpuOvercommit && h.Usage.Fresh(now) && h.Usage.UnlentCPUPercent() != nil {
+			l.CPUs = BookingCPUs(h, cpuOvercommitPercent) - t.reserved.CPUs
 		}
 		hs.ours[h.ID] = t.ours
 		if t.warming > 0 {
@@ -1542,7 +1579,7 @@ func (hs *hostSet) pickReduced(p *store.Pool, avoid map[string]bool) (*store.Hos
 	var best, bestAvoided *option
 	for _, h := range hs.hosts {
 		if hs.free[h.ID] <= 0 || !HostCanRun(h, p, hs.now) ||
-			(hostUnderCPUPressure(h, hs.now) && hs.warming[h.ID] > 0) ||
+			hs.cpuPressureHolds(h) ||
 			(hs.need != nil && hs.shortOf(h, p, *hs.need) != "") {
 			continue
 		}
@@ -1622,7 +1659,15 @@ func (hs *hostSet) eligible(h *store.Host, p *store.Pool) bool {
 // would take a runner of p at the pool's own size.
 func (hs *hostSet) eligibleAsSized(h *store.Host, p *store.Pool) bool {
 	return hs.free[h.ID] > 0 && hs.hasRoom(h, p) && HostCanRun(h, p, hs.now) &&
-		!(hostUnderCPUPressure(h, hs.now) && hs.warming[h.ID] > 0)
+		!hs.cpuPressureHolds(h)
+}
+
+// cpuPressureHolds reports whether the host's real CPU holds a new start.
+// At or above 85% busy, a host takes one start at a time: the next waits
+// until the one warming has settled. With CPU booked past the machine the
+// booking no longer says the host is full, so 85% real CPU holds every start.
+func (hs *hostSet) cpuPressureHolds(h *store.Host) bool {
+	return hostUnderCPUPressure(h, hs.now) && (hs.cpuOvercommit || hs.warming[h.ID] > 0)
 }
 
 // hasRoom reports whether what is still unpromised on the host covers one more
@@ -1832,7 +1877,14 @@ func (hs *hostSet) why(p *store.Pool) blockage {
 			if detail == "" {
 				detail = naming.ForSentence(h.Name) + ": " + HostAdmissionReason(h, hs.now)
 			}
-		case hostUnderCPUPressure(h, hs.now) && hs.warming[h.ID] > 0:
+		case hs.cpuPressureHolds(h):
+			if hs.cpuOvercommit && hs.warming[h.ID] == 0 {
+				held++
+				if detail == "" {
+					detail = naming.ForSentence(h.Name) + ": new starts held while CPU usage is at or above 85% and CPU is booked past the machine"
+				}
+				continue
+			}
 			warming++
 		case h.Throttle.Active() && hs.free[h.ID] <= 0 && h.ActiveRunners < h.Slots():
 			// Slots the operator configured and the throttle has taken back.

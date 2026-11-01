@@ -1150,3 +1150,20 @@ func TestTheMemoryOvercommitIsRefusedOutsideItsRangeAndWarnedAboveOneHundred(t *
 		}
 	}
 }
+
+func TestTheCPUOvercommitIsRefusedOutsideItsRangeAndWarnedAboveOneHundred(t *testing.T) {
+	for _, tc := range []struct {
+		percent       int
+		refused, warn bool
+	}{{99, true, false}, {100, false, false}, {200, false, true}, {400, false, true}, {401, true, false}} {
+		c := Default()
+		c.Scheduler.CPUOvercommitPercent = tc.percent
+		f := c.Validate()
+		if got := hasCode(f, "scheduler.cpu_overcommit_percent"); got != tc.refused {
+			t.Errorf("%d%% refused = %v, want %v", tc.percent, got, tc.refused)
+		}
+		if got := hasCode(f, "scheduler.cpu_overcommit_on"); got != tc.warn {
+			t.Errorf("%d%% warned = %v, want %v", tc.percent, got, tc.warn)
+		}
+	}
+}

@@ -15417,6 +15417,18 @@ components:
             core the runners' quotas can never take.
         allocatable_memory_mb: { type: integer, format: int64 }
         allocatable_disk_mb: { type: integer, format: int64 }
+        booking_memory_mb:
+          type: integer
+          format: int64
+          description: >-
+            The memory the scheduler may book on this host: `allocatable_memory_mb` times
+            `memory_overcommit_percent`. Equal to it at 100. Only the booking reads it; a runner
+            still starts only where its size and the reserve are measured free on the real host.
+        memory_overcommit_percent:
+          type: integer
+          minimum: 100
+          maximum: 300
+          description: The fleet's `scheduler.memory_overcommit_percent` this host is booked at.
         reserved_cpus:
           type: number
           description: >-

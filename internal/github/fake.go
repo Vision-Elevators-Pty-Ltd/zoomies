@@ -342,6 +342,18 @@ func (f *FakeGitHub) AddQueuedJob(repo, workflow, jobName string, labels []strin
 	return j.QueuedJob
 }
 
+// SetJobQueuedAt rewrites when GitHub says a job was queued, for a test of a
+// GitHub whose clock is not ours.
+func (f *FakeGitHub) SetJobQueuedAt(id int64, at time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, j := range f.jobs {
+		if j.ID == id {
+			j.QueuedAt = at
+		}
+	}
+}
+
 // StartJob marks a queued job as picked up by runnerName.
 func (f *FakeGitHub) StartJob(jobID int64, runnerName string) {
 	f.mu.Lock()

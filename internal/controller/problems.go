@@ -2208,7 +2208,7 @@ func (c *Controller) jobProblems(ctx context.Context, out *[]Problem) error {
 		// A job on GitHub's own runners or a vendor's is theirs to run however
 		// long it queues, and a job unclaimed for seconds may be another
 		// provider's, about to start there. Neither is this fleet's problem.
-		if hostedJob(u.Job.Labels) || now.Sub(u.Job.QueuedAt) < unmatchedGrace {
+		if hostedJob(u.Job.Labels) || u.Job.QueuedAge(now) < unmatchedGrace {
 			continue
 		}
 		unmatched = append(unmatched, u)

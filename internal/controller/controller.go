@@ -1080,13 +1080,16 @@ func (c *Controller) schedulerInterval() time.Duration {
 // policy converts the configured tunables into the scheduler's Policy.
 func (c *Controller) policy() scheduler.Policy {
 	return scheduler.Policy{
-		ScaleUpDelay:      c.cfg().Scheduler.ScaleUpDelay,
-		MaxRunnerLifetime: c.cfg().Scheduler.MaxRunnerLifetime,
-		ProvisionTimeout:  c.cfg().Scheduler.ProvisionTimeout,
-		DrainTimeout:      c.cfg().Scheduler.DrainTimeout,
-		MaxCreatesPerTick: c.cfg().Scheduler.MaxCreatesPerTick,
-		MaxRunners:        c.cfg().Limits.Runners,
-		Interval:          c.schedulerInterval(),
+		ScaleUpDelay: c.cfg().Scheduler.ScaleUpDelay,
+		// The policy is built from the live settings on every pass, so a change
+		// on the Settings page is in the next pass's booking.
+		MemoryOvercommitPercent: c.cfg().Scheduler.MemoryOvercommitPercent,
+		MaxRunnerLifetime:       c.cfg().Scheduler.MaxRunnerLifetime,
+		ProvisionTimeout:        c.cfg().Scheduler.ProvisionTimeout,
+		DrainTimeout:            c.cfg().Scheduler.DrainTimeout,
+		MaxCreatesPerTick:       c.cfg().Scheduler.MaxCreatesPerTick,
+		MaxRunners:              c.cfg().Limits.Runners,
+		Interval:                c.schedulerInterval(),
 	}
 }
 

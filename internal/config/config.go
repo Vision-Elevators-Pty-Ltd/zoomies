@@ -904,6 +904,15 @@ type Scheduler struct {
 	// survives a controller restart, and a re-run an operator asked for by
 	// hand counts against it like any other.
 	AutoRerunLimit int `yaml:"auto_rerun_limit"`
+	// MemoryOvercommitPercent is how much of each host's allocatable memory
+	// the scheduler may book, in percent: 100 books the machine once, 200
+	// twice. Only the booking is scaled. Containers keep their real limits,
+	// and every check on what a host actually has free (measured available
+	// memory, the reserve, the pressure holds and throttling) still reads the
+	// real machine, so a booking past it starts a runner only where the memory
+	// is measured free. It exists for runners whose limits are far above what
+	// their jobs use, which leave a fleet booked full and mostly idle.
+	MemoryOvercommitPercent int `yaml:"memory_overcommit_percent"`
 	// HostThrottling lets the controller throttle a host whose measurements
 	// say it is overwhelmed: fewer slots, and a lower CPU quota on the runners
 	// already on it, stepped back up after a stretch of calm. Off, the
@@ -1277,6 +1286,7 @@ func Default() *Config {
 			HostThrottling:          true,
 			HostAutoAdjust:          true,
 			AutoRerunLimit:          1,
+			MemoryOvercommitPercent: 100,
 			// Everything about size classes is off until an operator turns it
 			// on, and the figures below are what it does when they do. They are
 			// held equal to scheduler.DefaultSizeConfig by a test in the

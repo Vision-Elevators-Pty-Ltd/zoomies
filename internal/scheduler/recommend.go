@@ -63,8 +63,8 @@ func AskOf(pools []*store.Pool, fleetCPUs float64, fleetMemoryMB int64) RunnerAs
 		// one slot between them and asks for no more than anybody else.
 		typed := p.Resources.CPUs > 0 || p.Resources.MemoryMB > 0
 		containers := 1
-		if p.DockerMode == store.DockerDinD && typed {
-			containers = 2
+		if typed {
+			containers = p.TypedPairFactor(nil)
 		}
 		anyPair = anyPair || containers > 1
 		wantCPUs := p.Resources.CPUs * float64(containers)

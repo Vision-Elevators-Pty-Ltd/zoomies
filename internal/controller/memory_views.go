@@ -111,7 +111,7 @@ func memoryResourceView(r *store.Runner, p *store.Pool, h *store.Host) *MemoryRe
 	// What it was launched with, from its row: the pool's current charge for a
 	// runner is not that once the pool or the host has been edited, and is not
 	// computable at all from the raw pool a runner's view is rendered with.
-	guaranteed, ok := scheduler.LaunchedMemoryMB(p, r)
+	guaranteed, ok := scheduler.LaunchedMemoryMB(p, h, r)
 	if !ok {
 		return nil
 	}

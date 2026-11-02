@@ -294,7 +294,7 @@ func (hs *hostSet) sortedPhrases(m map[string]string) string {
 // the size it already had when nothing moved. A field the pool states is left
 // alone: the operator wrote that limit, and a runner is never given more than
 // it -- the need then only decides the host.
-func sizeForNeed(p *store.Pool, res Reservation, size *store.Resources, need Requirement) (Reservation, *store.Resources) {
+func sizeForNeed(p *store.Pool, h *store.Host, res Reservation, size *store.Resources, need Requirement) (Reservation, *store.Resources) {
 	raised := false
 	if p.Resources.CPUs <= 0 && need.CPUs > res.CPUs+cpuEpsilon {
 		res.CPUs, raised = need.CPUs, true
@@ -307,8 +307,8 @@ func sizeForNeed(p *store.Pool, res Reservation, size *store.Resources, need Req
 	}
 	grant := p.Resources
 	grant.MinCPUs, grant.MinMemoryMB = 0, 0
-	grant.CPUs = res.CPUs / fieldFactor(p, p.Resources.CPUs > 0)
-	grant.MemoryMB = res.MemoryMB / int64(fieldFactor(p, p.Resources.MemoryMB > 0))
+	grant.CPUs = res.CPUs / fieldFactor(p, h, p.Resources.CPUs > 0)
+	grant.MemoryMB = res.MemoryMB / int64(fieldFactor(p, h, p.Resources.MemoryMB > 0))
 	return res, &grant
 }
 

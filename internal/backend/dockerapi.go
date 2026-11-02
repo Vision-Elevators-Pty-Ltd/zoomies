@@ -506,6 +506,9 @@ type HostConfig struct {
 	Tmpfs          map[string]string `json:"Tmpfs,omitempty"`
 	Mounts         []Mount           `json:"Mounts,omitempty"`
 	RestartPolicy  RestartPolicy     `json:"RestartPolicy"`
+	// CgroupParent is the slice a shared-limit docker-in-docker pair is
+	// created under (see sharedlimit.go). Empty leaves the daemon's default.
+	CgroupParent string `json:"CgroupParent,omitempty"`
 }
 
 // Mount is one entry of HostConfig.Mounts. The agent uses it for one thing: an

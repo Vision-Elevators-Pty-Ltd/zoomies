@@ -286,10 +286,16 @@ type Spec struct {
 	// daemon is given; zero is the even split. The CPU and memory figures say it
 	// per resource and, where set, override it for that resource. See
 	// store.Resources.
-	DaemonSharePercent       int               `json:"daemon_share_percent,omitempty"`
-	DaemonCPUSharePercent    int               `json:"daemon_cpu_share_percent,omitempty"`
-	DaemonMemorySharePercent int               `json:"daemon_memory_share_percent,omitempty"`
-	Cache                    store.CacheConfig `json:"cache"`
+	DaemonSharePercent       int `json:"daemon_share_percent,omitempty"`
+	DaemonCPUSharePercent    int `json:"daemon_cpu_share_percent,omitempty"`
+	DaemonMemorySharePercent int `json:"daemon_memory_share_percent,omitempty"`
+	// DinDSharedLimit puts a docker-in-docker runner and its sidecar under one
+	// parent cgroup holding the pair's size between them (see
+	// store.Resources.DinDSharedLimit). An agent that predates it gives each
+	// container its own limit, which the scheduler charges for by the agent's
+	// features rather than by this field.
+	DinDSharedLimit bool              `json:"dind_shared_limit,omitempty"`
+	Cache           store.CacheConfig `json:"cache"`
 	// Tmpfs keeps the runner's work folder and /tmp in memory. A container
 	// backend mounts them; an agent that predates the field ignores it and the
 	// runner simply uses disk, which is why the controller warns about a pool

@@ -7683,6 +7683,11 @@ export interface components {
              * @example 35
              */
             daemon_memory_share_percent?: number;
+            /**
+             * @description For a `docker_mode: dind` pool with a typed `cpus` or `memory_mb`: hold the runner and its Docker sidecar to that size between them, instead of giving each container the whole figure. The pair is created under one systemd slice limited to the typed size, each container keeps its own limit no higher than it, and the host is charged the typed size once rather than twice. Suits jobs whose memory is in one container or the other rather than both at once. Needs a daemon on the systemd cgroup driver and an agent that advertises the `dind-shared-limit` feature; a host whose agent does not is still charged for both containers. Cannot be combined with `memory_burst.mode: automatic`. Off by default.
+             * @example true
+             */
+            dind_shared_limit?: boolean;
         };
         /** @description Whether an automatically-sized Docker or Podman pool only observes, or may use, CPU left over after every live runner's guaranteed host share and one imminent start have been protected. Memory has a policy of its own (`MemoryBurstPolicy`), because a memory limit can be raised and never taken back. Existing pools default to off; new pools default to observe. */
         CPUBurstPolicy: {

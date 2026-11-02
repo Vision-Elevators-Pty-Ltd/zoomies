@@ -771,6 +771,20 @@ func (s *Server) validatePool(ctx context.Context, p *store.Pool, existingID str
 			add(f.field, fmt.Sprintf("the daemon's share must be between %d and %d percent, or 0 for an even split; a container given less than a tenth of the slot is no limit in effect", store.MinDaemonSharePercent, store.MaxDaemonSharePercent))
 		}
 	}
+	// A shared limit is a parent cgroup over the runner and its daemon at the
+	// typed size, so it needs both a daemon and a typed size to mean anything.
+	// The memory valve raises one container's own limit, which the parent would
+	// cap: a loan the job could never use, charged to the host all the same.
+	if p.Resources.DinDSharedLimit {
+		switch {
+		case p.DockerMode != store.DockerDinD:
+			add("resources.dind_shared_limit", "a shared limit holds a runner and its Docker sidecar to one size between them, and only a pool with docker_mode dind has a sidecar; set docker_mode to dind or clear this")
+		case p.Resources.CPUs <= 0 && p.Resources.MemoryMB <= 0:
+			add("resources.dind_shared_limit", "a shared limit holds the pair to the size you typed, and this pool types none: its size is one slot of the host, which the pair already splits; set resources.cpus or resources.memory_mb, or clear this")
+		case p.MemoryBurst.Enforces():
+			add("resources.dind_shared_limit", "the memory valve raises one container's limit, which a shared limit caps at the pool's size, so its loans could never be used; set memory_burst.mode to observe or off, or clear this")
+		}
+	}
 	if p.Resources.DiskGB < 0 {
 		add("resources.disk_gb", "a disk limit cannot be negative; use 0 for no limit")
 	}
@@ -1565,10 +1579,5 @@ func validateMemoryBurst(p *store.Pool, add func(field, msg string)) {
 
 // typedFactor is how many containers a pool's typed memory limit is given to: two
 // for docker-in-docker, where the daemon is given the same limit, and one
-// otherwise.
-func typedFactor(p *store.Pool) int {
-	if p.DockerMode == store.DockerDinD {
-		return 2
-	}
-	return 1
-}
+// otherwise, a pair held to the limit between them included.
+func typedFactor(p *store.Pool) int { return p.TypedPairFactor(nil) }

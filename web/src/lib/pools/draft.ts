@@ -98,6 +98,13 @@ export interface PoolDraft {
    */
   daemon_cpu_share: string;
   daemon_memory_share: string;
+  /**
+   * Whether a docker-in-docker pair with a fixed size is held to it between its
+   * two containers, and charged it once, rather than each given the whole of
+   * it. There is no control for it yet; it is carried so that saving a pool
+   * from the form keeps what the API was told.
+   */
+  dind_shared_limit: boolean;
   /** Whether the division has been chosen, so a recommended one is only ever the start. */
   split_chosen: boolean;
   disk_gb: string;
@@ -193,6 +200,7 @@ export function emptyDraft(): PoolDraft {
     min_memory_mb: '',
     daemon_cpu_share: '',
     daemon_memory_share: '',
+    dind_shared_limit: false,
     split_chosen: false,
     disk_gb: '',
     provision_timeout: '',
@@ -272,6 +280,7 @@ export function draftFromPool(pool: Pool): PoolDraft {
     daemon_memory_share: fromNumber(
       resources.daemon_memory_share_percent ?? resources.daemon_share_percent,
     ),
+    dind_shared_limit: resources.dind_shared_limit ?? false,
     split_chosen: true,
     disk_gb: fromNumber(resources.disk_gb),
     provision_timeout: pool.runner_settings?.provision_timeout ?? '',
@@ -406,6 +415,15 @@ export function toPoolBody(draft: PoolDraft, options: { complete?: boolean } = {
     if (memoryShare !== undefined && memoryShare > 0 && memoryShare !== 50)
       resources.daemon_memory_share_percent = memoryShare;
   }
+  // A shared limit holds a pair to the fixed size between them, so it is sent
+  // only where there is a pair and a fixed size; anywhere else the API refuses it.
+  if (
+    draft.backend === 'docker' &&
+    draft.docker_mode === 'dind' &&
+    fixed &&
+    draft.dind_shared_limit
+  )
+    resources.dind_shared_limit = true;
   // Disk and the pids limit are independent of the choice: neither has a
   // share to be given, so a pool may cap its cache's disk and still leave
   // its size to the host.

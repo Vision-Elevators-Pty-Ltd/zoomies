@@ -60,6 +60,12 @@ const FeatureTmpfs = "tmpfs"
 // and the daemon it asked for is given 50%.
 const FeatureDaemonShare = "daemon-share"
 
+// FeatureDinDSharedLimit is advertised by an agent that holds a docker-in-docker
+// pair to its pool's typed size between them, under one parent cgroup. An older
+// agent ignores the spec's field and gives each container the whole figure,
+// which is why the scheduler reads this flag and charges such a host for both.
+const FeatureDinDSharedLimit = store.FeatureDinDSharedLimit
+
 // FeatureSelfUpdate is advertised by an agent that understands TaskUpdateAgent
 // and can carry it out on this host. An older agent does not ignore the kind, it
 // reports the task failed with "unknown task kind", so the controller asks for

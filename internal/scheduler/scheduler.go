@@ -126,6 +126,11 @@ type Policy struct {
 	// CPUOvercommitPercent is the same for CPU (scheduler.cpu_overcommit_percent):
 	// it scales the CPUs each host may be booked for, never a quota.
 	CPUOvercommitPercent int
+	// StartChargePercent is how much of a starting runner's size the measured
+	// check charges before the host's sample can contain it
+	// (scheduler.start_charge_percent). 100, or anything outside 1-99, charges
+	// it whole. See startCharge.
+	StartChargePercent int
 	// ScaleUpDelay is how long a job must have been queued before it counts as
 	// demand, which damps churn when jobs arrive in bursts.
 	ScaleUpDelay time.Duration
@@ -381,7 +386,7 @@ func Decide(s Snapshot) Plan {
 	t := &tick{
 		now:                s.Now,
 		policy:             s.Policy,
-		hosts:              newHostSetOvercommitted(s.Hosts, pools, s.Runners, s.Now, s.Policy.MemoryOvercommitPercent, s.Policy.CPUOvercommitPercent),
+		hosts:              newHostSetCharged(s.Hosts, pools, s.Runners, s.Now, s.Policy.MemoryOvercommitPercent, s.Policy.CPUOvercommitPercent, s.Policy.StartChargePercent),
 		budget:             s.Policy.MaxCreatesPerTick,
 		activeByRepository: s.ActiveByRepository,
 		poolCount:          len(pools),
@@ -1318,6 +1323,16 @@ type hostSet struct {
 	// cpuOvercommit says CPU is booked past the machine
 	// (Policy.CPUOvercommitPercent above 100); see cpuPressureHolds.
 	cpuOvercommit bool
+	// startChargePercent is Policy.StartChargePercent. bookedMemory is the
+	// memory still unpromised on each host by the booking alone, and
+	// measuredMemory, for a host with a fresh sample, what that sample says is
+	// free less what the starts it cannot yet contain are charged. Memory left
+	// is the tighter of the two. They are kept apart because a start is charged
+	// its whole size against the booking and only its start charge against the
+	// measurement.
+	startChargePercent int
+	bookedMemory       map[string]int64
+	measuredMemory     map[string]int64
 	// order is scheduler.host_order; see Snapshot.HostOrder.
 	order string
 	// need is set while a runner is being placed for a known requirement
@@ -1398,20 +1413,59 @@ func BookingCPUs(h *store.Host, percent int) float64 {
 // hosts by. A host with no fresh CPU sample is booked once: nothing would
 // notice it was full.
 func newHostSetOvercommitted(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, now time.Time, overcommitPercent, cpuOvercommitPercent int) *hostSet {
+	return newHostSetCharged(hosts, pools, runners, now, overcommitPercent, cpuOvercommitPercent, 100)
+}
+
+// chargePercent is a start charge read as a percentage, with anything that is
+// not one (zero from a policy that predates it, or a figure past 100) read as
+// the whole size.
+func chargePercent(percent int) int64 {
+	if percent <= 0 || percent > 100 {
+		return 100
+	}
+	return int64(percent)
+}
+
+// startCharge is what one runner of size typedMB, still starting, is charged
+// against a host's measured free memory: percent of its size, raised to what
+// its job is known to need (needMB, from the job history; zero for none) and
+// never above the size itself.
+//
+// A starting runner uses next to nothing until its job runs, and its job uses
+// what the job uses, not what the pool typed: trusted runners typed at 24 GB
+// whose jobs peak at 2-6 GB were each charged 24 GB, so a 60 GB host admitted
+// one or two starts at a time and never filled. The booking still charges the
+// whole size; this is only the measured half.
+func startCharge(typedMB, needMB int64, percent int) int64 {
+	pct := chargePercent(percent)
+	if typedMB <= 0 || pct == 100 {
+		return typedMB
+	}
+	return min(max(typedMB*pct/100, needMB), typedMB)
+}
+
+// newHostSetCharged is newHostSetOvercommitted with starts charged
+// startChargePercent of their size against the measured check (startCharge).
+// The host's reserve, the CPU holds, throttling and the booking are untouched.
+func newHostSetCharged(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, now time.Time, overcommitPercent, cpuOvercommitPercent, startChargePercent int) *hostSet {
 	overcommit := overcommitPercent > 100
 	cpuOvercommit := cpuOvercommitPercent > 100
+	pct := chargePercent(startChargePercent)
 	hs := &hostSet{
-		cpuOvercommit:  cpuOvercommit,
-		hosts:          sortedHosts(hosts),
-		free:           make(map[string]int, len(hosts)),
-		observedCPU:    make(map[string]float64, len(hosts)),
-		warming:        make(map[string]int, len(hosts)),
-		warmingDinD:    make(map[string]int, len(hosts)),
-		left:           make(map[string]Reservation, len(hosts)),
-		alloc:          make(map[string]store.HostAllocation, len(hosts)),
-		promisedMemory: make(map[string]int64, len(hosts)),
-		ours:           make(map[string]bool, len(hosts)),
-		now:            now,
+		cpuOvercommit:      cpuOvercommit,
+		startChargePercent: int(pct),
+		bookedMemory:       make(map[string]int64, len(hosts)),
+		measuredMemory:     make(map[string]int64, len(hosts)),
+		hosts:              sortedHosts(hosts),
+		free:               make(map[string]int, len(hosts)),
+		observedCPU:        make(map[string]float64, len(hosts)),
+		warming:            make(map[string]int, len(hosts)),
+		warmingDinD:        make(map[string]int, len(hosts)),
+		left:               make(map[string]Reservation, len(hosts)),
+		alloc:              make(map[string]store.HostAllocation, len(hosts)),
+		promisedMemory:     make(map[string]int64, len(hosts)),
+		ours:               make(map[string]bool, len(hosts)),
+		now:                now,
 	}
 	for _, h := range hs.hosts {
 		hs.free[h.ID] = h.Free()
@@ -1452,6 +1506,14 @@ func newHostSetOvercommitted(hosts []*store.Host, pools []*store.Pool, runners m
 			hs.warmingDinD[h.ID] += t.warmingDinD
 		}
 		pending := t.pending
+		// Starts the sample cannot contain yet are charged their start charge,
+		// not their size: what each is known to need is not to hand for a
+		// runner placed in an earlier pass, so the percentage alone is used.
+		if pct < 100 {
+			pending.MemoryMB = pending.MemoryMB * pct / 100
+			pending.CPUs = pending.CPUs * float64(pct) / 100
+		}
+		hs.bookedMemory[h.ID] = l.MemoryMB
 		if h.Usage.Fresh(now) {
 			if v := h.Usage.MemoryAvailableMB; v != nil {
 				// The host sample already includes running work, and what the
@@ -1471,6 +1533,7 @@ func newHostSetOvercommitted(hosts []*store.Host, pools []*store.Pool, runners m
 				if overcommit {
 					available -= h.MemoryReserve()
 				}
+				hs.measuredMemory[h.ID] = max(available, 0)
 				l.MemoryMB = min(l.MemoryMB, max(available, 0))
 			}
 			// CPU runners are using because it was lent them is not
@@ -1549,13 +1612,30 @@ func (hs *hostSet) placeAvoiding(p *store.Pool, n int, avoid map[string]bool) []
 		}
 		l := hs.left[h.ID]
 		l.CPUs -= res.CPUs
-		l.MemoryMB -= res.MemoryMB
 		l.DiskMB -= res.DiskMB
+		// The booking is charged the whole size, the measurement the start
+		// charge, and what is left is the tighter of the two, as it began.
+		var needMB int64
+		var needCPUs float64
+		if hs.need != nil {
+			needMB, needCPUs = hs.need.MemoryMB, hs.need.CPUs
+		}
+		hs.bookedMemory[h.ID] -= res.MemoryMB
+		l.MemoryMB = hs.bookedMemory[h.ID]
+		if m, ok := hs.measuredMemory[h.ID]; ok {
+			m -= startCharge(res.MemoryMB, needMB, hs.startChargePercent)
+			hs.measuredMemory[h.ID] = m
+			l.MemoryMB = min(l.MemoryMB, m)
+		}
 		hs.left[h.ID] = l
 		hs.promisedMemory[h.ID] -= res.MemoryMB
 		hs.ours[h.ID] = true
 		if cpu, ok := hs.observedCPU[h.ID]; ok {
-			hs.observedCPU[h.ID] = max(cpu-res.CPUs, 0)
+			charge := res.CPUs
+			if hs.startChargePercent < 100 && res.CPUs > 0 {
+				charge = min(max(res.CPUs*float64(hs.startChargePercent)/100, needCPUs), res.CPUs)
+			}
+			hs.observedCPU[h.ID] = max(cpu-charge, 0)
 		}
 		out = append(out, placement{hostID: h.ID, size: size, raised: raised})
 	}
@@ -1709,6 +1789,19 @@ func (hs *hostSet) leftFor(h *store.Host, p *store.Pool) Reservation {
 func (hs *hostSet) memoryLeft(h *store.Host, p *store.Pool) int64 {
 	if p.Resources.MemoryMB <= 0 && !hs.ours[h.ID] {
 		return hs.promisedMemory[h.ID]
+	}
+	// A start is held to its start charge against the measurement, not its
+	// size, so the measured half is read as that much larger for the runner
+	// asking: comparing it with the size is then asking whether the charge
+	// fits. The booking is still asked for the whole size. At a charge of 100
+	// this is exactly the room left.
+	if m, ok := hs.measuredMemory[h.ID]; ok && hs.startChargePercent < 100 {
+		typed := Reserve(p, h).MemoryMB
+		var needMB int64
+		if hs.need != nil {
+			needMB = hs.need.MemoryMB
+		}
+		return min(hs.bookedMemory[h.ID], m+typed-startCharge(typed, needMB, hs.startChargePercent))
 	}
 	return hs.left[h.ID].MemoryMB
 }

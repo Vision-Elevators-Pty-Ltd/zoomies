@@ -276,8 +276,9 @@ scheduler:
   host_auto_adjust: true        # ZOOMIES_HOST_AUTO_ADJUST -- keep every host at its recommended capacity and reserve; a host can override
   auto_rerun: false             # ZOOMIES_AUTO_RERUN -- re-run a job whose runner died under it; on is warned about
   auto_rerun_limit: 1           # ZOOMIES_AUTO_RERUN_LIMIT -- automatic re-runs per workflow run, 1–5
-  cpu_overcommit_percent: 100   # ZOOMIES_CPU_OVERCOMMIT_PERCENT: CPU each host may be booked for, 100–400; above 100 is warned about
-  memory_overcommit_percent: 100 # ZOOMIES_MEMORY_OVERCOMMIT_PERCENT: memory each host may be booked for, 100–300; above 100 is warned about
+  start_charge_percent: 100     # ZOOMIES_START_CHARGE_PERCENT: share of a starting runner's size held against measured free memory and CPU, 10–100; below 100 is warned about
+  cpu_overcommit_percent: 100   # ZOOMIES_CPU_OVERCOMMIT_PERCENT: CPU each host may be booked for, 100–800; above 100 is warned about
+  memory_overcommit_percent: 100 # ZOOMIES_MEMORY_OVERCOMMIT_PERCENT: memory each host may be booked for, 100–1000; above 100 is warned about
 
 capacity_demand:
   destination_url: ""           # ZOOMIES_CAPACITY_DEMAND_URL (empty disables)
@@ -706,8 +707,9 @@ the validator says so with `limits.loopback`.
 | `scheduler.registration_concurrency` | `ZOOMIES_REGISTRATION_CONCURRENCY` | at once | Bound concurrent credential requests per installation; default 1, range 1–16. Excess demand waits for a later scheduling pass. Existing calls finish when lowered. |
 | `scheduler.max_creates_per_tick` | `ZOOMIES_MAX_CREATES_PER_TICK` | at once | Runners created per pass: How many runners may be created in one pass, so a thundering herd of queued jobs cannot exhaust a host in one go. |
 | `scheduler.max_runner_lifetime` | `ZOOMIES_MAX_RUNNER_LIFETIME` | at once | Maximum runner lifetime: Drain a runner that has lived this long, next time it is not busy. It bounds how long a runner's credentials live; it never ends a job. |
-| `scheduler.cpu_overcommit_percent` | `ZOOMIES_CPU_OVERCOMMIT_PERCENT` | at once | CPU overcommit: How much of each host's allocatable CPU may be booked, in percent (100–400). 100 books the machine once. Runners keep their real CPU quotas, and new starts are still held when the host's real CPU is at 85% or more. |
-| `scheduler.memory_overcommit_percent` | `ZOOMIES_MEMORY_OVERCOMMIT_PERCENT` | at once | Memory overcommit: How much of each host's allocatable memory may be booked, in percent (100–300). 100 books the machine once. Above it, a runner still starts only where its size and the reserve are measured free on the real host, and containers keep their real limits. |
+| `scheduler.start_charge_percent` | `ZOOMIES_START_CHARGE_PERCENT` | at once | Start charge: How much of a starting runner's size is held against a host's measured free memory and CPU until the host's next sample contains it, in percent (10–100). A job with a history is charged at least what it is known to need. 100 charges the whole size. |
+| `scheduler.cpu_overcommit_percent` | `ZOOMIES_CPU_OVERCOMMIT_PERCENT` | at once | CPU overcommit: How much of each host's allocatable CPU may be booked, in percent (100–800). 100 books the machine once. Runners keep their real CPU quotas, and new starts are still held when the host's real CPU is at 85% or more. |
+| `scheduler.memory_overcommit_percent` | `ZOOMIES_MEMORY_OVERCOMMIT_PERCENT` | at once | Memory overcommit: How much of each host's allocatable memory may be booked, in percent (100–1000). 100 books the machine once. Above it, a runner still starts only where its size and the reserve are measured free on the real host, and containers keep their real limits. |
 | `scheduler.provision_timeout` | `ZOOMIES_PROVISION_TIMEOUT` | at once | Provision timeout: Fail a runner that never finishes registering, so a bad image does not hold a host slot for ever. |
 | `scheduler.scale_up_delay` | `ZOOMIES_SCALE_UP_DELAY` | at once | Scale-up delay: How long a job must have been queued before it counts as demand. It damps churn when jobs arrive in bursts; 0 reacts at once. |
 

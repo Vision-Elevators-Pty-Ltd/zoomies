@@ -1132,13 +1132,13 @@ func TestAPublicViewIsAWarningUnlessAuthenticationIsOffAnyway(t *testing.T) {
 	}
 }
 
-// The memory overcommit is held to 100-300, and anything above 100 is said out
+// The memory overcommit is held to 100-1000, and anything above 100 is said out
 // loud, because a booking past the machine is a less safe fleet than the default.
 func TestTheMemoryOvercommitIsRefusedOutsideItsRangeAndWarnedAboveOneHundred(t *testing.T) {
 	for _, tc := range []struct {
 		percent       int
 		refused, warn bool
-	}{{99, true, false}, {100, false, false}, {200, false, true}, {300, false, true}, {301, true, false}} {
+	}{{99, true, false}, {100, false, false}, {200, false, true}, {300, false, true}, {1000, false, true}, {1001, true, false}} {
 		c := Default()
 		c.Scheduler.MemoryOvercommitPercent = tc.percent
 		f := c.Validate()
@@ -1155,7 +1155,7 @@ func TestTheCPUOvercommitIsRefusedOutsideItsRangeAndWarnedAboveOneHundred(t *tes
 	for _, tc := range []struct {
 		percent       int
 		refused, warn bool
-	}{{99, true, false}, {100, false, false}, {200, false, true}, {400, false, true}, {401, true, false}} {
+	}{{99, true, false}, {100, false, false}, {200, false, true}, {400, false, true}, {800, false, true}, {801, true, false}} {
 		c := Default()
 		c.Scheduler.CPUOvercommitPercent = tc.percent
 		f := c.Validate()
@@ -1163,6 +1163,23 @@ func TestTheCPUOvercommitIsRefusedOutsideItsRangeAndWarnedAboveOneHundred(t *tes
 			t.Errorf("%d%% refused = %v, want %v", tc.percent, got, tc.refused)
 		}
 		if got := hasCode(f, "scheduler.cpu_overcommit_on"); got != tc.warn {
+			t.Errorf("%d%% warned = %v, want %v", tc.percent, got, tc.warn)
+		}
+	}
+}
+
+func TestTheStartChargeIsRefusedOutsideItsRangeAndWarnedBelowOneHundred(t *testing.T) {
+	for _, tc := range []struct {
+		percent       int
+		refused, warn bool
+	}{{9, true, false}, {10, false, true}, {30, false, true}, {100, false, false}, {101, true, false}} {
+		c := Default()
+		c.Scheduler.StartChargePercent = tc.percent
+		f := c.Validate()
+		if got := hasCode(f, "scheduler.start_charge_percent"); got != tc.refused {
+			t.Errorf("%d%% refused = %v, want %v", tc.percent, got, tc.refused)
+		}
+		if got := hasCode(f, "scheduler.start_charge_reduced"); got != tc.warn {
 			t.Errorf("%d%% warned = %v, want %v", tc.percent, got, tc.warn)
 		}
 	}

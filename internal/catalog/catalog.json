@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_from": "19d1c3c4",
+  "generated_from": "fe0a3478",
   "entries": [
     {
       "id": "agent.backend_missing",
@@ -3670,6 +3670,34 @@
       "fix": "A size routing wait is negative. Use a duration, or 0 for none.",
       "verify": null,
       "setting": "scheduler.size_class_hold",
+      "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
+      "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
+    },
+    {
+      "id": "scheduler.start_charge_percent",
+      "kind": "problem",
+      "title": "scheduler.start_charge_percent",
+      "category": "configuration",
+      "severity": "error",
+      "detection": "static",
+      "detects": "The start charge is outside 10–100. Above 100 would charge a start more than its size; below 10 charges next to nothing, and a burst of starts reads a host as empty.",
+      "fix": "The start charge is outside 10–100. Above 100 would charge a start more than its size; below 10 charges next to nothing, and a burst of starts reads a host as empty.",
+      "verify": null,
+      "setting": "scheduler.start_charge_percent",
+      "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
+      "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
+    },
+    {
+      "id": "scheduler.start_charge_reduced",
+      "kind": "problem",
+      "title": "scheduler.start_charge_reduced",
+      "category": "configuration",
+      "severity": "warning",
+      "detection": "static",
+      "detects": "A starting runner is held against its host's measured free memory and CPU at less than its size, or at what its job is known to need. Several started together can reach more than the host has free once their jobs run. Set it back to 100 to charge each start its whole size.",
+      "fix": "A starting runner is held against its host's measured free memory and CPU at less than its size, or at what its job is known to need. Several started together can reach more than the host has free once their jobs run. Set it back to 100 to charge each start its whole size.",
+      "verify": null,
+      "setting": "scheduler.start_charge_percent",
       "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
       "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
     },

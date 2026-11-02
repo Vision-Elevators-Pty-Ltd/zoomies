@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_from": "a9d72e14",
+  "generated_from": "19d1c3c4",
   "entries": [
     {
       "id": "agent.backend_missing",
@@ -3406,6 +3406,34 @@
       "fix": "Must be at least 1.",
       "verify": null,
       "setting": "scheduler.max_creates_per_tick",
+      "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
+      "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
+    },
+    {
+      "id": "scheduler.cpu_overcommit_on",
+      "kind": "problem",
+      "title": "scheduler.cpu_overcommit_on",
+      "category": "configuration",
+      "severity": "warning",
+      "detection": "static",
+      "detects": "Each host's CPUs are booked more than once. Every runner keeps its own quota and new starts are held at 85% real CPU, but runners already placed share the cores when they are busy at once, and each job runs slower than its size says. Set it back to 100 to book each host once.",
+      "fix": "Each host's CPUs are booked more than once. Every runner keeps its own quota and new starts are held at 85% real CPU, but runners already placed share the cores when they are busy at once, and each job runs slower than its size says. Set it back to 100 to book each host once.",
+      "verify": null,
+      "setting": "scheduler.cpu_overcommit_percent",
+      "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
+      "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
+    },
+    {
+      "id": "scheduler.cpu_overcommit_percent",
+      "kind": "problem",
+      "title": "scheduler.cpu_overcommit_percent",
+      "category": "configuration",
+      "severity": "error",
+      "detection": "static",
+      "detects": "The CPU overcommit is outside 100–400. Below 100 books less than the machine, which the host reserve already does by name; past 400 the booking says nothing about the machine.",
+      "fix": "The CPU overcommit is outside 100–400. Below 100 books less than the machine, which the host reserve already does by name; past 400 the booking says nothing about the machine.",
+      "verify": null,
+      "setting": "scheduler.cpu_overcommit_percent",
       "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
       "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
     },

@@ -913,6 +913,11 @@ type Scheduler struct {
 	// is measured free. It exists for runners whose limits are far above what
 	// their jobs use, which leave a fleet booked full and mostly idle.
 	MemoryOvercommitPercent int `yaml:"memory_overcommit_percent"`
+	// CPUOvercommitPercent is the same for CPU: how much of each host's
+	// allocatable CPU the scheduler may book, in percent. Runners keep their
+	// real CPU quotas, and the CPU pressure holds, throttling and the
+	// fit-the-machine checks read the real host.
+	CPUOvercommitPercent int `yaml:"cpu_overcommit_percent"`
 	// HostThrottling lets the controller throttle a host whose measurements
 	// say it is overwhelmed: fewer slots, and a lower CPU quota on the runners
 	// already on it, stepped back up after a stretch of calm. Off, the
@@ -1287,6 +1292,7 @@ func Default() *Config {
 			HostAutoAdjust:          true,
 			AutoRerunLimit:          1,
 			MemoryOvercommitPercent: 100,
+			CPUOvercommitPercent:    100,
 			// Everything about size classes is off until an operator turns it
 			// on, and the figures below are what it does when they do. They are
 			// held equal to scheduler.DefaultSizeConfig by a test in the

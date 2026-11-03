@@ -77,7 +77,7 @@ jobs:
   changes:
     name: What changed
     if: github.event.action != 'closed'
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 15 # the longest successful run seen was 3 minutes
     # actions: read is for the base step, which lists this workflow's runs.
     permissions:
@@ -306,7 +306,7 @@ jobs:
     # backlog stretches it. The limit is here to catch a hang, not a slow
     # machine, so it sits well above the slowest shard seen.
     timeout-minutes: 120
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     strategy:
       fail-fast: false
       matrix:
@@ -437,7 +437,7 @@ jobs:
     name: gofmt, vet and tidy
     needs: [changes]
     if: github.event.action != 'closed' && needs.changes.outputs.go == 'true'
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 25 # the longest successful run seen was 11 minutes
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -482,7 +482,7 @@ jobs:
     name: AI Context generator and publication contract
     needs: changes
     if: github.event.action != 'closed' && needs.changes.outputs.go == 'true'
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -607,7 +607,7 @@ jobs:
     permissions:
       contents: read
       id-token: write # Codecov authenticates uploads without a stored secret.
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 20 # the longest successful run seen was 2 minutes
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -812,7 +812,7 @@ jobs:
     name: Upgrade
     needs: [changes]
     if: github.event.action != 'closed' && (needs.changes.outputs.go == 'true' || needs.changes.outputs.installer == 'true')
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 45 # the longest successful run seen was 16 minutes
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -886,7 +886,7 @@ jobs:
     name: staticcheck
     needs: [changes]
     if: github.event.action != 'closed' && needs.changes.outputs.go == 'true'
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 25 # the longest successful run seen was 9 minutes
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -910,7 +910,7 @@ jobs:
     name: UI
     needs: [changes]
     if: github.event.action != 'closed' && (needs.changes.outputs.go == 'true' || needs.changes.outputs.web == 'true')
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 25 # the longest successful run seen was 3 minutes before it built the binary
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -981,7 +981,7 @@ jobs:
     # libraries cannot be fetched as a standalone binary, so the install step
     # below unpacks them into a private prefix instead of installing them
     # system-wide when sudo is not available.
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 90 # the longest successful run seen was 46 minutes
     # The suite drives the real binary, which `ui` builds and uploads, so a Go
     # change can break it as surely as a web one. Only the binary is shared: the
@@ -1106,7 +1106,7 @@ jobs:
 
   build-matrix:
     name: Cross-compile
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 25 # the longest successful run seen was 8 minutes
     needs: [changes, ui]
     # On a main push that publishes, dev-binaries runs `make dist`, which builds
@@ -1163,7 +1163,7 @@ jobs:
     # leaving GitHub to skip this one because a job it waits on did not run.
     if: ${{ !cancelled() && github.event.action != 'closed' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && needs.changes.outputs.publish == 'true' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     needs: [changes, go, ui, installer]
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 60 # the longest successful run seen was 21 minutes
     permissions:
       contents: write
@@ -1287,7 +1287,7 @@ jobs:
     # process), which makes sudo refuse to escalate, passwordless entry in
     # the sudoers file or not. Both tools below are fetched without root
     # instead, which also works unchanged on a GitHub-hosted runner.
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 20 # the longest successful run seen was under a minute
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1371,7 +1371,7 @@ jobs:
 
   images:
     name: Images
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 90 # the longest successful run seen was 37 minutes
     needs: [changes, dev-binaries]
     # Main pushes and manual recovery publish matching binaries before images.
@@ -1611,7 +1611,7 @@ jobs:
   # catalogue in step, so a new operating system cannot be half-added.
   runner-images:
     name: Runner image (${{ matrix.tag }}, ${{ matrix.arch }})
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || (((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64') }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || (((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64') }}
     timeout-minutes: 60 # the longest successful run seen was 25 minutes (rocky-9 on arm64)
     needs: [images]
     if: github.event.action != 'closed' && needs.images.outputs.runner == 'true'
@@ -1957,7 +1957,7 @@ jobs:
   # a matrix row built both architectures itself.
   runner-manifests:
     name: Runner image manifests
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 15 # the longest successful run seen was 1 minute
     needs: [images, runner-images]
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.images.outputs.publish == 'true' && needs.images.outputs.runner == 'true' && needs.runner-images.result != 'skipped' }}
@@ -2054,7 +2054,7 @@ jobs:
     # dependants, so the gate has to run whatever the jobs before it did, but a
     # run cancelled by a newer push has a newer run to report for it.
     if: ${{ !cancelled() && github.event.action != 'closed' }}
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 5 # two shell steps and no checkout
     steps:
       - name: What each job did

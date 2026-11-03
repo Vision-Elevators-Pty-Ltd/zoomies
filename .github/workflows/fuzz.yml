@@ -50,7 +50,7 @@ jobs:
     # run on the fleet, and a manual dispatch that asks for GitHub's runners.
     # ci.yml and govulncheck.yml choose the same way, and a test in internal/docs
     # holds all three to it.
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false

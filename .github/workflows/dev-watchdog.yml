@@ -86,11 +86,12 @@ jobs:
   # Started by main's CI being requested: waits, on GitHub's machines, until
   # that commit's CI finishes, a newer commit supersedes it, or the limit
   # passes -- and only the last of those hands over to Watch.
+  # Only upstream publishes the dev channel that this recovery watches.
   wait:
     name: Wait
     # A push only. A dispatched run is a recovery, possibly this workflow's
     # own, and a watchdog waiting on it would recover the recovery.
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push'
+    if: github.repository == 'eyupio/zoomies' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
     # GitHub's ceiling for a hosted job. A limit longer than this cannot be
     # waited out here; the schedule is what covers it.
@@ -158,7 +159,7 @@ jobs:
     # a CI run that was not a push too, and that is a reason to do nothing, not
     # to act at once. A wait cancelled by a newer commit's is not a reason to
     # act either.
-    if: ${{ !cancelled() && (github.event_name != 'workflow_run' || needs.wait.outputs.act == 'true') }}
+    if: ${{ !cancelled() && github.repository == 'eyupio/zoomies' && (github.event_name != 'workflow_run' || needs.wait.outputs.act == 'true') }}
     # GitHub's machines, never the fleet's: this is the job that has to run
     # when the fleet cannot.
     runs-on: ubuntu-latest

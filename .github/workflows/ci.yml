@@ -824,8 +824,13 @@ jobs:
       # test on top of it. It is also the only check that install.sh can still
       # find a release at all -- everything else about the installer is a syntax
       # check.
+      # This fork's schema ends at 0134. Upstream v1.4.2 has a newer
+      # ledger, so using it as the old binary tests an unsupported downgrade.
+      # v1.4.1 is a published ancestor with the matching schema; moving this
+      # baseline requires taking the corresponding upstream migrations too.
       - name: Pick the latest installable release
         env:
+          UPGRADE_BASELINE: ${{ github.repository == 'Vision-Elevators-Pty-Ltd/zoomies' && 'v1.4.1' || '' }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           tag=$(python3 - <<'PY'
@@ -833,6 +838,11 @@ jobs:
           import json
           import time
           import urllib.request
+
+          baseline = os.environ.get("UPGRADE_BASELINE", "")
+          if baseline:
+              print(baseline)
+              raise SystemExit(0)
 
           repo = "eyupio/zoomies"
           asset = "zoomies_linux_amd64"

@@ -283,7 +283,25 @@ func TestAnUploadThatOmitsAFileTellsEveryReaderWhatIsMissing(t *testing.T) {
 
 	r = f.h.do(request{method: http.MethodGet, path: source + "/read?path=" + uploadBigFile, cookie: f.cookie})
 	r.mustStatus(t, http.StatusOK, "reading an omitted file")
-	if !strings.Contains(string(r.body), `"omitted":"too_large"`) || !strings.Contains(string(r.body), `"text":""`) || strings.Contains(string(r.body), "aaaa") {
+	// A snapshot digest can itself contain "aaaa". Check the file excerpt rather
+	// than rejecting valid identity metadata along with the omitted file content.
+	var page struct {
+		Excerpts []struct {
+			Path    string  `json:"path"`
+			Text    *string `json:"text"`
+			Omitted string  `json:"omitted"`
+			Bytes   int     `json:"bytes"`
+		} `json:"excerpts"`
+	}
+	if err := json.Unmarshal(r.body, &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Excerpts) != 1 {
+		t.Fatalf("an omitted file should have exactly one excerpt: %s", r.body)
+	}
+	excerpt := page.Excerpts[0]
+	if excerpt.Path != uploadBigFile || excerpt.Omitted != aicontext.OmittedTooLarge ||
+		excerpt.Text == nil || *excerpt.Text != "" || excerpt.Bytes != aicontext.MaxFileBytes+7 {
 		t.Fatalf("a read of an omitted file should say why there is no text: %s", r.body)
 	}
 

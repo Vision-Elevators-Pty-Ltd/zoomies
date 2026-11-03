@@ -73,7 +73,7 @@ jobs:
     # A release run belongs to its tag even if checkout selects main, so a
     # release asks for a new run whose ref really is main.
     # workflow_dispatch can be triggered by GITHUB_TOKEN.
-    if: github.event.action != 'closed' && github.event_name == 'release'
+    if: github.event.action != 'closed' && github.repository == 'eyupio/zoomies' && github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 10 # the longest successful run seen was under a minute
     permissions:
@@ -304,9 +304,10 @@ jobs:
 
       # The site is served by the edge worker from this build's static assets.
       # Deploying from the job that built and checked it keeps one artefact:
-      # the upload is the publish.
+      # the upload is the publish. Forks validate the build without publishing
+      # upstream's site or submitting its URLs to search engines.
       - name: Deploy the site to the edge
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: github.repository == 'eyupio/zoomies' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         working-directory: site-worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -317,7 +318,7 @@ jobs:
       # deploy made from somewhere else can replace it between runs. The
       # published script is fetched the way a user's `curl -fsSL` fetches it.
       - name: The live site serves the installer scripts
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: github.repository == 'eyupio/zoomies' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: |
           set -eu
           for f in install.sh install.ps1 connect-proxmox.sh; do
@@ -334,7 +335,7 @@ jobs:
       # reported and does not fail the deploy -- the site is up, and the
       # sitemap will get the pages found regardless.
       - name: Tell IndexNow which pages changed
-        if: steps.indexnow.outputs.payload != ''
+        if: github.repository == 'eyupio/zoomies' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.indexnow.outputs.payload != ''
         env:
           PAYLOAD: ${{ steps.indexnow.outputs.payload }}
         run: |

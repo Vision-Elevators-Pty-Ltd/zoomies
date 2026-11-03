@@ -116,7 +116,7 @@ func TestReleaseRefreshKeepsTagsOutOfThePagesEnvironment(t *testing.T) {
 	// publishes is in it and not in a job of its own.
 	build, deploy := rest, rest
 	for _, want := range []string{
-		"if: github.event.action != 'closed' && github.event_name == 'release'",
+		"if: github.event.action != 'closed' && github.repository == 'eyupio/zoomies' && github.event_name == 'release'",
 		"actions: write",
 		"GH_TOKEN: ${{ github.token }}",
 	} {
@@ -130,8 +130,8 @@ func TestReleaseRefreshKeepsTagsOutOfThePagesEnvironment(t *testing.T) {
 	if !strings.Contains(build, "if: github.event.action != 'closed' && github.event_name != 'release'") {
 		t.Error("release tags still build a Pages artefact instead of leaving it to the main-branch run")
 	}
-	if !strings.Contains(deploy, "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'") {
-		t.Error("Pages must only deploy from main, including when a release requested the run")
+	if !strings.Contains(deploy, "if: github.repository == 'eyupio/zoomies' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'") {
+		t.Error("Pages must only deploy from upstream main, including when a release requested the run")
 	}
 	if strings.Contains(build, "actions: write") || strings.Contains(deploy, "actions: write") {
 		t.Error("only the release refresh job needs permission to dispatch a workflow")

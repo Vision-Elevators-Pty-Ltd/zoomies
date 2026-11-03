@@ -137,10 +137,11 @@ jobs:
           BASE: ${{ steps.base.outputs.sha || github.event.pull_request.base.sha || github.event.before }}
         run: |
           set -eu
-          # Main publishes the dev channel from any commit that changes what
-          # is shipped. Nothing else publishes from CI.
+          # Only upstream owns the registry paths below. A fork builds and
+          # tests its changes without publishing upstream images or dev releases.
           on_main=false
-          if [ "$EVENT" != "pull_request" ] && [ "$REF" = "refs/heads/main" ]; then
+          if [ "$EVENT" != "pull_request" ] && [ "$REF" = "refs/heads/main" ] \
+             && [ "$GITHUB_REPOSITORY" = "eyupio/zoomies" ]; then
             on_main=true
           fi
           everything() {
@@ -1415,7 +1416,8 @@ jobs:
         run: |
           set -eu
           if [ "${{ github.event_name }}" != "pull_request" ] \
-             && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+             && [ "${{ github.ref }}" = "refs/heads/main" ] \
+             && [ "$GITHUB_REPOSITORY" = "eyupio/zoomies" ]; then
             echo "value=true" >> "$GITHUB_OUTPUT"
           else
             echo "value=false" >> "$GITHUB_OUTPUT"

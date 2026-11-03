@@ -42,6 +42,11 @@ func changesScript(t *testing.T) string {
 // these files, with a git that answers only the two questions it asks.
 func decide(t *testing.T, event string, files ...string) map[string]string {
 	t.Helper()
+	return decideInRepository(t, "eyupio/zoomies", event, files...)
+}
+
+func decideInRepository(t *testing.T, repository, event string, files ...string) map[string]string {
+	t.Helper()
 	dir := t.TempDir()
 	stub := "#!/bin/sh\ncase \"$1\" in fetch) exit 0 ;; diff) printf '%s\\n' " + strings.Join(files, " ") + " ;; esac\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(stub), 0o755); err != nil {
@@ -49,13 +54,14 @@ func decide(t *testing.T, event string, files ...string) map[string]string {
 	}
 	out := filepath.Join(dir, "output")
 	ref := "refs/pull/1/merge"
-	if event == "push" {
+	if event == "push" || event == "workflow_dispatch" {
 		ref = "refs/heads/main"
 	}
 	cmd := exec.Command("sh", "-c", changesScript(t))
 	cmd.Env = append(os.Environ(),
 		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"EVENT="+event, "REF="+ref, "BASE=0123abc", "GITHUB_OUTPUT="+out)
+		"EVENT="+event, "REF="+ref, "BASE=0123abc", "GITHUB_OUTPUT="+out,
+		"GITHUB_REPOSITORY="+repository)
 	if msg, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("the filter failed for %v: %v\n%s", files, err, msg)
 	}
@@ -70,6 +76,18 @@ func decide(t *testing.T, event string, files ...string) map[string]string {
 		}
 	}
 	return got
+}
+
+func TestForkCIBuildsWithoutPublishingUpstreamArtifacts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the filter is POSIX shell, and runs on Linux in CI")
+	}
+	for _, event := range []string{"push", "workflow_dispatch"} {
+		got := decideInRepository(t, "Vision-Elevators-Pty-Ltd/zoomies", event, "internal/store/queries.go")
+		if got["go"] != "true" || got["publish"] != "false" {
+			t.Errorf("fork %s must build without publishing: %v", event, got)
+		}
+	}
 }
 
 // A merge to main used to run everything, so a README edit rebuilt and
@@ -376,7 +394,8 @@ func decidePush(t *testing.T, base string, diffs map[string][]string) map[string
 	cmd := exec.Command("sh", "-c", changesScript(t))
 	cmd.Env = append(os.Environ(),
 		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"EVENT=push", "REF=refs/heads/main", "BASE="+base, "GITHUB_OUTPUT="+out)
+		"EVENT=push", "REF=refs/heads/main", "BASE="+base, "GITHUB_OUTPUT="+out,
+		"GITHUB_REPOSITORY=eyupio/zoomies")
 	if msg, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("the filter failed against %s: %v\n%s", base, err, msg)
 	}

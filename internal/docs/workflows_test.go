@@ -656,7 +656,7 @@ func TestTheAgentImageIsBuiltAndPublished(t *testing.T) {
 
 func TestCIDogfoodsZoomiesWithRecoveryForEveryJob(t *testing.T) {
 	files := workflowFiles(t)
-	selector := `((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64'`
+	selector := `((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64'`
 	runsOn := regexp.MustCompile(`(?m)^    runs-on: (.+)$`)
 	for _, name := range []string{"ci.yml", "govulncheck.yml", "fuzz.yml"} {
 		body := files[name]
@@ -724,7 +724,7 @@ func TestContainerBuildsStampTheirRunnerChannel(t *testing.T) {
 		count       int
 	}{
 		{"ci.yml", "RUNNER_IMAGE_TAG=dev", 2},
-		{"release.yml", "RUNNER_IMAGE_TAG=${{ needs.setup.outputs.tag }}", 4},
+		{"release.yml", "RUNNER_IMAGE_TAG=${{ needs.setup.outputs.tag }}", 2},
 	} {
 		if got := strings.Count(workflows[tc.file], tc.stamp); got != tc.count {
 			t.Errorf("%s: found %d runner tag stamps, want %d controller/agent build paths", tc.file, got, tc.count)

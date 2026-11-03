@@ -50,7 +50,7 @@ jobs:
     if: github.event.action != 'closed'
     # Fork code never reaches the self-hosted fleet. A manual dispatch can use
     # GitHub-hosted capacity if the Zoomies pool is unavailable.
-    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
+    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.runner == 'github') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 20 # the longest successful run seen was 3 minutes
     # Bound the scanner and compiler on small runner containers. A killed
     # scanner has no result; keep the full reachable-code scan enabled.

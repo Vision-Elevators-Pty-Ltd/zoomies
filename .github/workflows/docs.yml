@@ -53,8 +53,8 @@ on:
       runner:
         description: "Where to build. github is the escape hatch from a single vendor."
         type: choice
-        default: blacksmith
-        options: [blacksmith, github]
+        default: zoomies
+        options: [zoomies, github]
 
 permissions:
   contents: read
@@ -97,7 +97,7 @@ jobs:
     # The site is a mkdocs build with no vendor-specific step in it, so the
     # escape hatch here is one expression: publishing documentation must not be
     # impossible because a runner vendor is having a bad day.
-    runs-on: ${{ inputs.runner == 'github' && 'ubuntu-latest' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    runs-on: ${{ inputs.runner == 'github' && 'ubuntu-latest' || 'zoomies-linux-x64' }}
     timeout-minutes: 15 # the longest successful run seen was 1 minute
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

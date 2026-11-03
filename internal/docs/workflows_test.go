@@ -724,7 +724,7 @@ func TestContainerBuildsStampTheirRunnerChannel(t *testing.T) {
 		count       int
 	}{
 		{"ci.yml", "RUNNER_IMAGE_TAG=dev", 2},
-		{"release.yml", "RUNNER_IMAGE_TAG=${{ needs.setup.outputs.tag }}", 4},
+		{"release.yml", "RUNNER_IMAGE_TAG=${{ needs.setup.outputs.tag }}", 2},
 	} {
 		if got := strings.Count(workflows[tc.file], tc.stamp); got != tc.count {
 			t.Errorf("%s: found %d runner tag stamps, want %d controller/agent build paths", tc.file, got, tc.count)

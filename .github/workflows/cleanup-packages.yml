@@ -62,6 +62,9 @@ concurrency:
 
 jobs:
   cleanup:
+    # The prune scripts default to GHCR_OWNER=eyupio. A fork does not own
+    # those packages and must never run upstream's scheduled deletion job.
+    if: github.repository == 'eyupio/zoomies'
     permissions:
       actions: read
       contents: read

@@ -24,7 +24,9 @@ jobs:
   cancel:
     name: Cancel
     if: github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
+    # API-only metadata work: the existing light PR pool has gh and does not
+    # reserve a full build runner while it cancels superseded checks.
+    runs-on: zoomies-pr-light
     timeout-minutes: 10 # the longest successful run seen was under a minute
     permissions:
       actions: write

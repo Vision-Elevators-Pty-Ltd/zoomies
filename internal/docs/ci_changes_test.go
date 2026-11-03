@@ -394,7 +394,8 @@ func decidePush(t *testing.T, base string, diffs map[string][]string) map[string
 	cmd := exec.Command("sh", "-c", changesScript(t))
 	cmd.Env = append(os.Environ(),
 		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"EVENT=push", "REF=refs/heads/main", "BASE="+base, "GITHUB_OUTPUT="+out)
+		"EVENT=push", "REF=refs/heads/main", "BASE="+base, "GITHUB_OUTPUT="+out,
+		"GITHUB_REPOSITORY=eyupio/zoomies")
 	if msg, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("the filter failed against %s: %v\n%s", base, err, msg)
 	}

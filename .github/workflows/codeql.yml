@@ -49,13 +49,10 @@ jobs:
   analyze:
     name: CodeQL (${{ matrix.language }})
     if: github.event.action != 'closed'
-    # GitHub's runner, not the fleet's. A fleet slot is a 2-core, 4 GB runner
-    # whose cgroup gives CodeQL under 2 GB, and both analyses outgrew it: the
-    # JavaScript queries stop with "CodeQL is out of memory" and the traced Go
-    # build is killed with exit 137, on changes that touch neither. The rest of
-    # CI stays on the fleet it is testing; this one job needs the memory more
-    # than the dogfooding, and on a public repository it costs nothing.
-    runs-on: ubuntu-latest
+    # This organisation's fork has an 8-CPU/32-GiB PR pool for analysis.
+    # Preserve upstream's hosted runner and the existing hosted fallback
+    # for pull requests whose code comes from another repository.
+    runs-on: ${{ github.repository == 'Vision-Elevators-Pty-Ltd/zoomies' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'zoomies-linux-x64' || 'ubuntu-latest' }}
     timeout-minutes: 90
     permissions:
       contents: read

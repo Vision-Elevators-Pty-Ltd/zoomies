@@ -209,26 +209,36 @@ func (c *Controller) snapshot(ctx context.Context) (scheduler.Snapshot, error) {
 		}
 	}
 	mode := c.cfg().Scheduler.HistorySizing
+	booking := c.bookingInputs(ctx, pools)
 	var history map[store.JobUsageKey][]store.JobPeak
-	if mode == scheduler.HistoryShadow || mode == scheduler.HistoryOn {
+	if mode == scheduler.HistoryShadow || mode == scheduler.HistoryOn || booking != nil {
 		// Read for every distinct queued job, whichever pool ends up running
 		// it: the store answers per pool and the scheduler picks the pool's.
 		// A failed read costs this pass its history and nothing else -- the
-		// fleet places as it did before history existed.
+		// fleet places as it did before history existed. History booking
+		// also reads the job each runner is running, to book the runner at it.
 		var keys []store.JobUsageKey
 		for _, j := range jobs {
 			if j.State == store.JobQueued {
 				keys = append(keys, store.JobUsageKey{Repo: j.Repo, Workflow: j.Workflow, JobName: j.JobName})
 			}
 		}
+		if booking != nil {
+			for _, k := range booking.RunnerJobs {
+				keys = append(keys, store.JobUsageKey{Repo: k.Repo, Workflow: k.Workflow, JobName: k.JobName})
+			}
+		}
 		if h, err := c.st.JobUsageHistory(ctx, keys); err == nil {
 			history = h
 		} else {
 			c.log.Warn("could not read job history; placing without it this pass", "error", err)
+			// Without the jobs' history a runner would be booked at its
+			// pool's figure whatever it is running; book every one whole.
+			booking = nil
 		}
 	}
 	return scheduler.Snapshot{
-		JobHistory: history, HistorySizing: mode,
+		JobHistory: history, HistorySizing: mode, Booking: booking,
 		HostOrder: c.cfg().Scheduler.HostOrder,
 		Readiness: readiness, PreferReadiness: c.cfg().Scheduler.PlacementMode == "readiness",
 		LastProvisioned:    lastProvisioned,
@@ -245,6 +255,35 @@ func (c *Controller) snapshot(ctx context.Context) (scheduler.Snapshot, error) {
 		Policy:             c.policy(),
 		Jitter:             poolJitter(pools),
 	}, nil
+}
+
+// bookingInputs reads what scheduler.memory_booking=history books runners
+// from: each pool's recent measured runs, and the job each runner is running.
+// Nil where it would change nothing (history booking is off, or memory is
+// not overcommitted) and where either read fails, which books every runner
+// at its size for the pass, as the fleet did before.
+func (c *Controller) bookingInputs(ctx context.Context, pools []*store.Pool) *scheduler.BookingInputs {
+	cfg := c.cfg().Scheduler
+	if cfg.MemoryBooking != scheduler.BookingHistory || cfg.MemoryOvercommitPercent <= 100 {
+		return nil
+	}
+	ids := make([]string, 0, len(pools))
+	for _, p := range pools {
+		if p != nil {
+			ids = append(ids, p.ID)
+		}
+	}
+	runs, err := c.st.PoolUsageHistory(ctx, ids, scheduler.PoolBookingRuns)
+	if err != nil {
+		c.log.Warn("could not read the pools' job history; booking runners at their size this pass", "error", err)
+		return nil
+	}
+	jobs, err := c.st.RunningJobKeys(ctx)
+	if err != nil {
+		c.log.Warn("could not read which job each runner is running; booking runners at their size this pass", "error", err)
+		return nil
+	}
+	return &scheduler.BookingInputs{PoolRuns: runs, RunnerJobs: jobs}
 }
 
 // poolJitter draws one number per pool for the scheduler to spread its

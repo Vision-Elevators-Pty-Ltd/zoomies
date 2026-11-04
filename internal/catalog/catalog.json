@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_from": "bd9f354c",
+  "generated_from": "6e938ed2",
   "entries": [
     {
       "id": "agent.backend_missing",
@@ -3518,6 +3518,34 @@
       "fix": "Idle runners are recycled sooner than a long job takes, so work may be interrupted.",
       "verify": null,
       "setting": "scheduler.max_runner_lifetime",
+      "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
+      "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
+    },
+    {
+      "id": "scheduler.memory_booking",
+      "kind": "problem",
+      "title": "scheduler.memory_booking",
+      "category": "configuration",
+      "severity": "error",
+      "detection": "static",
+      "detects": "Use `history` or `typed`.",
+      "fix": "Use `history` or `typed`.",
+      "verify": null,
+      "setting": "scheduler.memory_booking",
+      "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
+      "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
+    },
+    {
+      "id": "scheduler.memory_booking_headroom_percent",
+      "kind": "problem",
+      "title": "scheduler.memory_booking_headroom_percent",
+      "category": "configuration",
+      "severity": "error",
+      "detection": "static",
+      "detects": "The headroom history booking adds to a job's ninetieth-percentile peak is outside 0–100. Past 100 books a runner for more than twice what its job has used, which typed booking does more plainly.",
+      "fix": "The headroom history booking adds to a job's ninetieth-percentile peak is outside 0–100. Past 100 books a runner for more than twice what its job has used, which typed booking does more plainly.",
+      "verify": null,
+      "setting": "scheduler.memory_booking_headroom_percent",
       "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
       "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
     },

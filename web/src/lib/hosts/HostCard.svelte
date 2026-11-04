@@ -47,6 +47,7 @@
   import ResourceBar from './ResourceBar.svelte';
   import { backendTrouble } from './backends';
   import { committedNotice } from './committed';
+  import { bookedMemoryRow } from './booking';
   import { byHandLink, hostUpdateWords, skewFact } from './update';
   import { hostVitals } from './vitals';
 
@@ -367,7 +368,12 @@
       });
     }
     const memTotal = host.allocatable_memory_mb ?? 0;
-    if (memTotal > 0) {
+    // With memory overcommitted the scheduler places against its booking
+    // ledger, not the typed sizes against allocatable: show that one.
+    const booked = bookedMemoryRow(host.memory_booking, host.name);
+    if (booked) {
+      rows.push(booked);
+    } else if (memTotal > 0) {
       const used = host.reserved_memory_mb ?? 0;
       rows.push({
         label: 'Memory',

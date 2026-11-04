@@ -164,6 +164,77 @@ func (s *Store) jobUsageHistory(ctx context.Context, repo, workflow, job string,
 	return rows.Err()
 }
 
+// poolUsageHistorySQL is a const so a query-plan test can pin the statement
+// that ships: it runs for every pool on every scheduling pass under
+// scheduler.memory_booking=history, so it walks the pool's index newest first
+// and stops at the limit rather than sorting the pool's whole history.
+const poolUsageHistorySQL = `SELECT peak_cpus, peak_memory_mb, oom_killed, granted_memory_mb FROM jobs
+	WHERE pool_id = ? AND state = 'completed' AND (peak_memory_mb > 0 OR oom_killed = 1)
+	ORDER BY queued_at DESC LIMIT ?`
+
+// PoolUsageHistory returns each named pool's most recent measured runs, newest
+// first, at most limit of them per pool: what the pool's jobs used, whichever
+// jobs they were. A pool with none measured is absent.
+func (s *Store) PoolUsageHistory(ctx context.Context, poolIDs []string, limit int) (map[string][]JobPeak, error) {
+	out := map[string][]JobPeak{}
+	if limit <= 0 {
+		return out, nil
+	}
+	seen := map[string]bool{}
+	for _, id := range poolIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		rows, err := s.read.QueryContext(ctx, poolUsageHistorySQL, id, limit)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var p JobPeak
+			var oom int
+			if err := rows.Scan(&p.CPUs, &p.MemoryMB, &oom, &p.GrantedMemoryMB); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			p.OOMKilled = oom == 1
+			out[id] = append(out[id], p)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// runningJobKeysQuery is RunnersWithAJob's question with the job's name kept:
+// which job each runner is running.
+var runningJobKeysQuery = hot(`SELECT runner_id, repo, workflow, job_name, pool_id FROM jobs
+	WHERE state = 'in_progress' AND runner_id != '' ORDER BY queued_at`)
+
+// RunningJobKeys returns, by runner ID, the job GitHub says each runner is
+// running, named the way its history is kept. A runner with two jobs in
+// progress, which GitHub does not do, is given the newer.
+func (s *Store) RunningJobKeys(ctx context.Context) (map[string]JobUsageKey, error) {
+	rows, err := s.hotRead().Query(ctx, runningJobKeysQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]JobUsageKey{}
+	for rows.Next() {
+		var runner string
+		var k JobUsageKey
+		if err := rows.Scan(&runner, &k.Repo, &k.Workflow, &k.JobName, &k.PoolID); err != nil {
+			return nil, err
+		}
+		out[runner] = k
+	}
+	return out, rows.Err()
+}
+
 // OutputTailLines and OutputTailRunes bound what a job keeps of its runner's
 // last output: enough to show what killed it, little enough to keep for every
 // failed job, and never one enormous line.

@@ -96,7 +96,7 @@ func TestEachPressureSignalNamesItself(t *testing.T) {
 		want string
 	}{
 		{"the CPU hold, with a runner no limit binds", pressed(now, 99, true, 1, 8192), "CPU has been at or above 95% for 30 s with 1 runner here that no CPU limit binds"},
-		{"a load average past twice the cores", pressed(now, 60, false, 17, 8192), "load average is 17.0, at least twice the host's 8 CPUs"},
+		{"a load average past twice the cores, with the CPU busy", pressed(now, 90, false, 17, 8192), "load average is 17.0, at least twice the host's 8 CPUs"},
 		{"memory at the reserve", pressed(now, 60, false, 1, store.MinHostReserveMemoryMB), "available memory is at or below the host's reserve"},
 	}
 	for _, tc := range cases {
@@ -109,6 +109,72 @@ func TestEachPressureSignalNamesItself(t *testing.T) {
 	// per core and memory to spare is a host doing its job.
 	if got := NextThrottle(pressed(now, 90, false, 8, 8192), now); got.Active() {
 		t.Errorf("a busy host was throttled: %+v", got)
+	}
+}
+
+// Linux counts a task waiting on disk in the load average, so an IO-heavy CI
+// host reads a load past twice its cores with half its CPU idle. Measured on
+// ci-nl-01 (24 CPUs) on 4 November 2026: load 25-30, CPU 43-50%, I/O wait
+// 18%. Throttled on that load, it gave up slots it had the cores for, and
+// then never climbed back down. The load average is CPU pressure only when the
+// CPU is busy.
+func TestADiskBoundHostIsNotThrottledForItsLoad(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	h := pressed(now, 45, false, 60, 8192)
+	h.CPUs = 24
+	if over, reason := hostOverwhelmed(h); over {
+		t.Fatalf("a host at 45%% CPU with a load of 2.5 a core was overwhelmed: %s", reason)
+	}
+	if got := NextThrottle(h, now); got.Active() {
+		t.Fatalf("a disk-bound host with idle cores was throttled: %+v", got)
+	}
+	// The same load with the CPU busy is the overload the rule is for.
+	*h.Usage.CPUPercent = cpuCalmPercent
+	if got := NextThrottle(h, now); got.Level != 1 || !strings.Contains(got.Reason, "load average is 60.0") {
+		t.Fatalf("a host at %v%% CPU with a load of 2.5 a core = %+v, want rung 1 for its load", cpuCalmPercent, got)
+	}
+	// A host that sends no CPU figure cannot say its cores have room, and is
+	// judged on its load as it always was.
+	h.Usage.CPUPercent = nil
+	if over, _ := hostOverwhelmed(h); !over {
+		t.Fatal("a host with no CPU figure and a load of 2.5 a core was not overwhelmed")
+	}
+}
+
+// The other half: a host already on a rung, its CPU at 45% and its load 1.2 a
+// core, sat in the band between the two load lines for good (not
+// overwhelmed, and never calm), so the throttle outlived the pressure that set
+// it. Below 85% CPU the load is not read for calm either.
+func TestAThrottledDiskBoundHostCalmsDownDespiteItsLoad(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	h := pressed(now, 45, false, 1.2*24, 8192)
+	h.CPUs = 24
+	at := now.Add(-ThrottleStep)
+	h.Throttle = store.HostThrottle{Level: 1, Since: &at, ChangedAt: &at, Reason: "the 1-minute load average is 60.0, at least twice the host's 24 CPUs"}
+	if !hostCalm(h) {
+		t.Fatal("a host at 45% CPU with a load of 1.2 a core was not calm")
+	}
+	got := NextThrottle(h, now)
+	if got.Level != 1 || got.CalmSince == nil {
+		t.Fatalf("the first calm sample = %+v, want the calm streak started", got)
+	}
+	h.Throttle = got
+	done := now.Add(ThrottleRecovery)
+	h.Usage.SampledAt = done
+	if got = NextThrottle(h, done); got.Active() {
+		t.Fatalf("after %s of calm the throttle = %+v, want it lifted", ThrottleRecovery, got)
+	}
+	// Busy cores and the same load are still not calm, even where the CPU
+	// bar alone would pass because most of the CPU in use was lent: the cores
+	// are busy, so the load is runnable work queued behind them.
+	*h.Usage.CPUPercent = 97
+	h.Usage.LentCPUPercent = 40
+	if hostCalm(h) {
+		t.Fatal("a host at 97% CPU, 40% of it lent, with a load of 1.2 a core was calm")
+	}
+	h.Usage.LoadAverage1 = nil
+	if !hostCalm(h) {
+		t.Fatal("setup: the same host without its load was not calm")
 	}
 }
 

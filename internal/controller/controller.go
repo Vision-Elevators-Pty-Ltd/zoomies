@@ -295,6 +295,22 @@ type Controller struct {
 	// on a fleet whose webhooks are also broken the difference is every job.
 	lastPollAt    atomic.Int64
 	jobPollOffset atomic.Int64
+	// startChecksMu guards startChecks and startChecked, which the poller
+	// writes and the job-recovery loop reads: two goroutines on two timers.
+	startChecksMu sync.Mutex
+	// startChecks are the jobs held here as queued that the last sweep did not
+	// find queued on GitHub, by job row ID, with when a sweep first noticed.
+	// Without webhooks a job that started (above all one that started and
+	// finished between two sweeps) simply drops out of the listing, and
+	// nothing else says so until reconcileKnownJobs reaches it on its two-minute
+	// rotation. Until then it counts as demand and the scheduler starts runners
+	// for it. The job-recovery loop checks these first, inside its own bounded
+	// batch; see reconcileKnownJobs.
+	startChecks map[string]time.Time
+	// startChecked is when each job was last checked from startChecks, so a job
+	// GitHub still has queued (one the listing left out because its bounded
+	// sweep did not reach that run) is not checked again on every pass.
+	startChecked map[string]time.Time
 	// fence is the recovery fence, read from the database at start and kept
 	// here so that a decision made ten times a minute is not ten database
 	// reads. It is a pointer so the zero value -- no fence -- costs nothing to

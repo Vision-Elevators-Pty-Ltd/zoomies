@@ -330,14 +330,16 @@ test('a host under sustained pressure is throttled, says why, and an operator ca
     expect(join.ok()).toBeTruthy();
     const credentials = (await join.json()) as { host_id: string; agent_token: string };
     hostId = credentials.host_id;
-    // A load average of twenty on eight CPUs is a runnable queue the machine
-    // is not draining, and it steps the throttle up on the first beat: memory
-    // is left healthy so the sentence names the load and nothing else.
+    // A load average of twenty on eight CPUs, with the CPU busy, is a runnable
+    // queue the machine is not draining, and it steps the throttle up on the
+    // first beat. (With the CPU under 85% the load is read as tasks waiting on
+    // disk and throttles nothing.) Memory is left healthy and the CPU under the
+    // 95% hold so the sentence names the load and nothing else.
     const beat = await page.request.post('/api/v1/agent/heartbeat', {
       headers: { Authorization: `Bearer ${credentials.agent_token}` },
       data: {
         protocol_version: 1,
-        usage: { cpu_percent: 60, memory_available_mb: 8192, load_average_1m: 20 },
+        usage: { cpu_percent: 90, memory_available_mb: 8192, load_average_1m: 20 },
       },
     });
     expect(beat.ok()).toBeTruthy();

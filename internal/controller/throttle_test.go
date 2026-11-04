@@ -65,8 +65,10 @@ func (f *throttleFixture) audits(t *testing.T, action string) int {
 	return len(rows)
 }
 
-// A host whose load average has run past twice its cores is a host being
-// pushed harder than it can go, and the pressure holds alone would only
+// A host whose load average has run past twice its cores, with its CPU busy,
+// is a host being pushed harder than it can go (with its CPU idle the load is
+// tasks waiting on disk, which fewer slots would not help; see
+// scheduler.LoadPerCPUOverwhelmed), and the pressure holds alone would only
 // bounce it in and out of admission. The ladder takes a quarter of its slots
 // and tells its agent to run the jobs at three quarters of their quota, and
 // every surface an operator reads -- the row, the view, the problems drawer,
@@ -74,7 +76,7 @@ func (f *throttleFixture) audits(t *testing.T, action string) int {
 func TestASustainedLoadAverageThrottlesAHost(t *testing.T) {
 	f := newThrottleFixture(t)
 	h := f.h
-	f.load = 20
+	f.cpu, f.load = 90, 20
 	resp, host := f.beat(t)
 
 	if resp.Throttle == nil || resp.Throttle.Level != 1 || resp.Throttle.CPUFactor != 0.75 {
@@ -141,14 +143,14 @@ func TestASustainedLoadAverageThrottlesAHost(t *testing.T) {
 func TestAThrottleLiftsOneStepAfterCalm(t *testing.T) {
 	f := newThrottleFixture(t)
 	h := f.h
-	f.load = 20
+	f.cpu, f.load = 90, 20
 	f.beat(t)
 	h.advance(scheduler.ThrottleStep)
 	if _, host := f.beat(t); host.Throttle.Level != 2 {
 		t.Fatalf("setup: level %d, want 2", host.Throttle.Level)
 	}
 
-	f.load = 2
+	f.cpu, f.load = 30, 2
 	_, host := f.beat(t)
 	if host.Throttle.Level != 2 || host.Throttle.CalmSince == nil {
 		t.Fatalf("one calm beat: %+v; want the rung kept and the calm streak started", host.Throttle)
@@ -183,7 +185,7 @@ func TestAThrottleLiftsOneStepAfterCalm(t *testing.T) {
 func TestAnOperatorCanClearAThrottle(t *testing.T) {
 	f := newThrottleFixture(t)
 	h := f.h
-	f.load = 20
+	f.cpu, f.load = 90, 20
 	f.beat(t)
 	h.advance(scheduler.ThrottleStep)
 	f.beat(t)
@@ -232,7 +234,7 @@ func TestAnOperatorCanClearAThrottle(t *testing.T) {
 func TestHousekeepingLiftsAThrottleWhoseHostStoppedMeasuring(t *testing.T) {
 	f := newThrottleFixture(t)
 	h := f.h
-	f.load = 20
+	f.cpu, f.load = 90, 20
 	if _, host := f.beat(t); host.Throttle.Level != 1 {
 		t.Fatalf("setup: %+v", host.Throttle)
 	}
@@ -267,7 +269,7 @@ func TestThrottlingOffDecidesNothingAndLiftsWhatStands(t *testing.T) {
 	f := newThrottleFixture(t)
 	h := f.h
 	h.c.UpdateConfig(func(cfg *config.Config) { cfg.Scheduler.HostThrottling = false })
-	f.load = 20
+	f.cpu, f.load = 90, 20
 	resp, host := f.beat(t)
 	if host.Throttle.Active() || resp.Throttle == nil || resp.Throttle.Level != 0 || resp.Throttle.CPUFactor != 1 {
 		t.Fatalf("with throttling off: row %+v, answer %+v; want no rung and the agent still told so", host.Throttle, resp.Throttle)
@@ -297,7 +299,7 @@ func TestThrottlingOffDecidesNothingAndLiftsWhatStands(t *testing.T) {
 func TestARejoiningHostStartsOnNoRung(t *testing.T) {
 	f := newThrottleFixture(t)
 	h := f.h
-	f.load = 20
+	f.cpu, f.load = 90, 20
 	if _, host := f.beat(t); !host.Throttle.Active() {
 		t.Fatal("setup: not throttled")
 	}

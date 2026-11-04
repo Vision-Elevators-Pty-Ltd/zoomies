@@ -285,11 +285,14 @@ room is kept free by placing less there, and nothing stops a job that runs away
 from taking it) and the memory reserve is itself the line pressure is judged
 against: a host counts as overwhelmed when available memory falls *to* it, so
 holding more back means being throttled sooner rather than later. When the
-reason names the **load average** instead, look for work no quota binds: the
-kernel counts a task waiting on disk towards the load average while it keeps a
+reason names the **load average** instead, the CPU was at 85% or more as well:
+look for work no quota binds. The load average alone does not throttle a host,
+because the kernel counts a task waiting on disk towards it while it keeps a
 container that has spent its CPU quota off the run queue, so a host can sit at
-40% CPU with a load past twice its cores and a daemon too busy to answer a
-`create`. `docker_mode: dind` is the usual multiplier, since each of its slots
+40% CPU with a load past twice its cores. That host is short of disk, not
+cores, and taking slots away does not give it more disk: its I/O wait figure
+says so, and a daemon too busy to answer a `create` is the symptom to look
+for. `docker_mode: dind` is the usual multiplier, since each of its slots
 is two containers; a typed pool gives both the same limits, and a pool sized
 by its host still splits one slot between them. Either way a slot too thin to
 give both a comfortable share (or, for a pool with a minimum, the minimum

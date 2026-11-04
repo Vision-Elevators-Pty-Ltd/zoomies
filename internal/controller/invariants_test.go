@@ -178,4 +178,49 @@ func TestTheThrottleLadderIsPacedAgainstTheMeasurementsItClimbsOn(t *testing.T) 
 	if store.MinCPUFactor < 0.5 {
 		t.Fatalf("store.MinCPUFactor is %v, below the half speed a running job is promised; a throttled job would time out rather than finish late", store.MinCPUFactor)
 	}
+	// The load average counts tasks waiting on disk, so it is read as CPU
+	// pressure only where the CPU is at the 85% that releases the admission
+	// hold. Pinned on the ladder itself rather than on a constant: a host just
+	// under that bar with a load at three times its cores is not stepped down,
+	// and a throttled one there is calm and steps down after ThrottleRecovery.
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	cpu, load, memory := 84.9, 3*scheduler.LoadPerCPUOverwhelmed*24, int64(64*1024)
+	h := &store.Host{CPUs: 24, Capacity: 8, MemoryMB: 128 * 1024,
+		Usage: store.HostUsage{CPUPercent: &cpu, LoadAverage1: &load, MemoryAvailableMB: &memory, SampledAt: now}}
+	if got := scheduler.NextThrottle(h, now); got.Active() {
+		t.Fatalf("a host at %v%% CPU was throttled for a load of %v on %d CPUs: %+v", cpu, load, h.CPUs, got)
+	}
+	at := now.Add(-scheduler.ThrottleStep)
+	h.Throttle = store.HostThrottle{Level: 1, Since: &at, ChangedAt: &at, CalmSince: &at, Reason: "load"}
+	h.Usage.SampledAt = at.Add(scheduler.ThrottleRecovery)
+	if got := scheduler.NextThrottle(h, h.Usage.SampledAt); got.Active() {
+		t.Fatalf("a throttled host at %v%% CPU stayed on its rung for its load: %+v", cpu, got)
+	}
+	cpu = 85
+	h.Throttle = store.HostThrottle{}
+	h.Usage.SampledAt = now
+	if got := scheduler.NextThrottle(h, now); !got.Active() {
+		t.Fatalf("a host at 85%% CPU with a load of %v on %d CPUs was not throttled", load, h.CPUs)
+	}
+}
+
+// The job-recovery pass is the one timer that checks known jobs against
+// GitHub, and its batch is what it costs the installation's quota. The start
+// checks a sweep hands it come out of that batch, never on top of it, and
+// must leave the rotation part of it so that missed completions are still
+// found. A job a start check found still queued has to come round again
+// before the rotation's two-minute cutoff would reach it anyway, or the
+// recheck would buy nothing.
+func TestStartChecksComeOutOfTheRecoveryBatch(t *testing.T) {
+	if startCheckShare <= 0 || startCheckShare >= reconcileBatch {
+		t.Fatalf("startCheckShare is %d of a batch of %d; it has to leave the rotation at least one check and take at least one itself", startCheckShare, reconcileBatch)
+	}
+	// 15 s is the shortest poll interval production runs; the pass's
+	// worst-case hourly cost there has to stay under half of GitHub's 5,000.
+	if perHour := reconcileBatch * int(time.Hour/(15*time.Second)); perHour > 2500 {
+		t.Fatalf("the recovery pass can spend %d calls an hour at a 15 s interval, more than half an installation's quota", perHour)
+	}
+	if startRecheckAfter >= 2*time.Minute {
+		t.Fatalf("startRecheckAfter is %s, not inside the rotation's two-minute cutoff", startRecheckAfter)
+	}
 }

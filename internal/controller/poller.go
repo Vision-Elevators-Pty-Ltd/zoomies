@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/eyupio/zoomies/internal/github"
@@ -135,6 +137,12 @@ func (c *Controller) discoverJobs(ctx context.Context) {
 	}
 
 	found, changed := 0, 0
+	// listed is every job this sweep's listings held, queued or running, and
+	// swept the installations whose listing came back: a job of one of those
+	// that is held here as queued and was listed by none of them is a job
+	// GitHub no longer has waiting. See noteUnlistedQueuedJobs.
+	listed := map[int64]bool{}
+	swept := map[string]bool{}
 	for _, inst := range insts {
 		if ctx.Err() != nil {
 			return
@@ -177,13 +185,18 @@ func (c *Controller) discoverJobs(ctx context.Context) {
 		// Waiting and running both: "found" is what the listing held, and
 		// "changed" the part of it still waiting for a runner.
 		found += len(jobs)
+		for _, q := range jobs {
+			listed[q.ID] = true
+		}
 		n, err := c.ingestQueuedJobs(ctx, inst, jobs)
 		if err != nil {
 			c.log.Error("could not record polled jobs", "installation", inst.ID, "error", err)
 			continue
 		}
+		swept[inst.ID] = true
 		changed += n
 	}
+	c.noteUnlistedQueuedJobs(ctx, now, listed, swept)
 
 	if found > 0 {
 		c.log.Debug("polled GitHub for unfinished jobs", "found", found, "new_or_changed", changed)
@@ -295,12 +308,19 @@ func (c *Controller) ingestQueuedJobsWith(ctx context.Context, polled *store.Ins
 // backwards. Two cases are left where they were. A job this controller already
 // has as started or finished belongs to reconcileKnownJobs, and applying it
 // again on every sweep would cost a write and a scheduling pass per running
-// job for nothing. A job running somewhere else occupies nothing here, and a
-// row for it would never be reconciled to a completion.
+// job for nothing. A job running somewhere else that has no row here is left
+// alone too: it occupies nothing here, and a row for it would never be
+// reconciled to a completion.
+//
+// A job that does have a row here, still queued, is started whatever runner
+// GitHub names, or none. The row is demand until something moves it, and a
+// job one of the organisation's other runners took (a static runner, another
+// pool's), or one GitHub has not yet named a runner for, is as started as one
+// of ours: the scheduler kept starting runners for such jobs until the
+// known-job check reached them two minutes or more later, and that check
+// applies the same in_progress from GetWorkflowJob that is on this page for
+// free.
 func (c *Controller) ingestStartedJob(ctx context.Context, q github.QueuedJob) {
-	if q.RunnerName == "" {
-		return
-	}
 	known, err := c.st.GetJobByGitHubID(ctx, q.ID)
 	switch {
 	case err == nil:
@@ -310,13 +330,17 @@ func (c *Controller) ingestStartedJob(ctx context.Context, q github.QueuedJob) {
 	case !errors.Is(err, store.ErrNotFound):
 		c.log.Warn("could not look up a polled running job", "github_job_id", q.ID, "error", err)
 		return
-	}
-	if _, err := c.st.GetRunnerByName(ctx, q.RunnerName); err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			c.log.Warn("could not look up the runner of a polled running job",
-				"github_job_id", q.ID, "runner", q.RunnerName, "error", err)
+	default:
+		if q.RunnerName == "" {
+			return
 		}
-		return
+		if _, err := c.st.GetRunnerByName(ctx, q.RunnerName); err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				c.log.Warn("could not look up the runner of a polled running job",
+					"github_job_id", q.ID, "runner", q.RunnerName, "error", err)
+			}
+			return
+		}
 	}
 	started := &github.WorkflowJobEvent{
 		Action:       string(store.JobInProgress),
@@ -454,55 +478,210 @@ func (o *repoOwners) of(ctx context.Context, repo string) string {
 // still reports it, so restricting recovery to managed jobs leaves those rows
 // running for ever when their completion delivery is missed.
 // A 404 or API failure is not a cancellation.
+//
+// Each pass makes at most reconcileBatch GetWorkflowJob calls, and that bound
+// is what the pass costs the installation's quota whatever it checks. The jobs
+// a sweep found missing from GitHub's queue (startChecks) go first, up to
+// startCheckShare of the batch, because each of them is likely demand that is
+// no longer there and is starting runners nobody will use; the rest of the
+// batch is the rotation over older unfinished jobs, which is never squeezed
+// below reconcileBatch-startCheckShare so that missed completions are still
+// found at a steady pace.
 func (c *Controller) reconcileKnownJobs(ctx context.Context, now time.Time) {
-	const batch = 10
+	checks := c.takeStartChecks(ctx, now, startCheckShare)
+	checked := make(map[string]bool, len(checks))
+	for _, j := range checks {
+		checked[j.ID] = true
+	}
+
 	cutoff := now.Add(-2 * time.Minute)
 	offset := int(c.jobPollOffset.Load())
 	jobs, total, err := c.st.ListJobs(ctx, store.JobFilter{
 		States: []store.JobState{store.JobQueued, store.JobInProgress}, Until: &cutoff,
-	}, store.Page{Limit: batch, Offset: offset})
+	}, store.Page{Limit: reconcileBatch - len(checks), Offset: offset})
 	if err != nil {
 		c.log.Warn("could not list jobs to reconcile", "error", err)
-		return
+		jobs = nil
+	} else {
+		next := offset + len(jobs)
+		if next >= total {
+			next = 0
+		}
+		c.jobPollOffset.Store(int64(next))
 	}
-	next := offset + len(jobs)
-	if next >= total {
-		next = 0
-	}
-	c.jobPollOffset.Store(int64(next))
 	for _, j := range jobs {
+		if !checked[j.ID] {
+			checks = append(checks, j)
+			checked[j.ID] = true
+		}
+	}
+	for _, j := range checks {
 		if ctx.Err() != nil {
 			return
 		}
-		if j.InstallationID == "" || IsDemoID(j.InstallationID) || c.githubHeld(j.InstallationID, now) {
-			continue
+		c.reconcileKnownJob(ctx, j, now)
+	}
+}
+
+const (
+	// reconcileBatch is how many known jobs one job-recovery pass may check
+	// against GitHub, one call each. At the 15 s poll interval that is 2,400
+	// calls an hour against an installation's 5,000, and it is the whole of
+	// what the pass spends: the start checks below come out of it, not on top.
+	reconcileBatch = 10
+	// startCheckShare is the most of a batch the start checks may take.
+	startCheckShare = 7
+	// startRecheckAfter is how long a job a start check found still queued
+	// waits before another sweep's absence can put it back on the list. The
+	// listing is bounded (maxPollRuns, maxPollRequests), so on a busy
+	// organisation some genuinely queued jobs are left out of every sweep; this
+	// keeps them from taking the share on every pass while the rotation and the
+	// jobs that really did start wait.
+	startRecheckAfter = time.Minute
+)
+
+// reconcileKnownJob checks one known unfinished job against GitHub and applies
+// GitHub's start or completion. A job GitHub still has queued, a lookup that
+// failed and an installation inside its rate-limit hold all leave the row as
+// it is.
+func (c *Controller) reconcileKnownJob(ctx context.Context, j *store.Job, now time.Time) {
+	if j.InstallationID == "" || IsDemoID(j.InstallationID) || c.githubHeld(j.InstallationID, now) {
+		return
+	}
+	inst, err := c.st.GetInstallation(ctx, j.InstallationID)
+	if err != nil {
+		return
+	}
+	client, err := c.clients.get(ctx, inst)
+	if err != nil {
+		return
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	remote, err := client.GetWorkflowJob(checkCtx, j.Repo, j.GitHubJobID)
+	cancel()
+	c.observeGitHub(inst.ID, err)
+	if err != nil {
+		if errors.Is(err, github.ErrRateLimited) {
+			c.holdRateLimited(inst.ID, err, now, "reconciling jobs")
 		}
-		inst, err := c.st.GetInstallation(ctx, j.InstallationID)
-		if err != nil {
-			continue
-		}
-		client, err := c.clients.get(ctx, inst)
-		if err != nil {
-			continue
-		}
-		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		remote, err := client.GetWorkflowJob(checkCtx, j.Repo, j.GitHubJobID)
-		cancel()
-		c.observeGitHub(inst.ID, err)
-		if err != nil {
-			if errors.Is(err, github.ErrRateLimited) {
-				c.holdRateLimited(inst.ID, err, now, "reconciling jobs")
-			}
-			c.log.Warn("could not reconcile workflow job", "job", j.ID, "error", err)
-			continue
-		}
-		if remote.State() != store.JobCompleted && remote.State() != store.JobInProgress {
-			continue
-		}
-		if err := c.applyWorkflowJob(ctx, remote, sourcePoller, nil); err != nil {
-			c.log.Warn("could not update reconciled workflow job", "job", j.ID, "error", err)
+		c.log.Warn("could not reconcile workflow job", "job", j.ID, "error", err)
+		return
+	}
+	if remote.State() != store.JobCompleted && remote.State() != store.JobInProgress {
+		return
+	}
+	if err := c.applyWorkflowJob(ctx, remote, sourcePoller, nil); err != nil {
+		c.log.Warn("could not update reconciled workflow job", "job", j.ID, "error", err)
+	}
+}
+
+// noteUnlistedQueuedJobs puts on startChecks every job held here as queued
+// that this sweep's listings did not hold, queued or running, for an
+// installation whose listing came back.
+//
+// That is what a started job looks like to a controller without webhooks: an
+// idle runner takes a job within seconds, a short job is over before the next
+// sweep, and a finished job is in no listing, so the row stays queued, and
+// keeps the scheduler starting runners for it, until the known-job rotation
+// reaches it, at the earliest two minutes after it was queued. It costs no
+// GitHub call here; the check is made by the job-recovery loop, inside its
+// own bounded batch.
+//
+// An installation whose listing failed, was skipped for fresh webhooks or is
+// inside a rate-limit hold says nothing about its jobs, so they are left out.
+// A job checked within startRecheckAfter is left out too: it was still queued
+// on GitHub then, and missing from a bounded listing is no new evidence.
+func (c *Controller) noteUnlistedQueuedJobs(ctx context.Context, now time.Time, listed map[int64]bool, swept map[string]bool) {
+	if len(swept) == 0 {
+		return
+	}
+	queued, err := c.st.ListQueuedJobs(ctx)
+	if err != nil {
+		c.log.Warn("could not list queued jobs to compare with the sweep", "error", err)
+		return
+	}
+	c.startChecksMu.Lock()
+	defer c.startChecksMu.Unlock()
+	for id, at := range c.startChecked {
+		if now.Sub(at) >= startRecheckAfter {
+			delete(c.startChecked, id)
 		}
 	}
+	for _, j := range queued {
+		if listed[j.GitHubJobID] || !swept[j.InstallationID] {
+			continue
+		}
+		if _, recent := c.startChecked[j.ID]; recent {
+			continue
+		}
+		if _, ok := c.startChecks[j.ID]; ok {
+			continue
+		}
+		if c.startChecks == nil {
+			c.startChecks = map[string]time.Time{}
+		}
+		c.startChecks[j.ID] = now
+	}
+}
+
+// takeStartChecks takes up to n jobs off startChecks for this pass to check,
+// the longest-waiting first, and stamps each as checked.
+//
+// A job that is no longer queued here (a sweep or a delivery has moved it
+// since) is dropped without costing a slot or a call. One whose installation
+// is inside a rate-limit hold is left on the list for a pass after the hold,
+// rather than taking a slot it could not use.
+func (c *Controller) takeStartChecks(ctx context.Context, now time.Time, n int) []*store.Job {
+	type pending struct {
+		id string
+		at time.Time
+	}
+	c.startChecksMu.Lock()
+	order := make([]pending, 0, len(c.startChecks))
+	for id, at := range c.startChecks {
+		order = append(order, pending{id, at})
+	}
+	c.startChecksMu.Unlock()
+	if len(order) == 0 {
+		return nil
+	}
+	slices.SortFunc(order, func(a, b pending) int {
+		if d := a.at.Compare(b.at); d != 0 {
+			return d
+		}
+		return strings.Compare(a.id, b.id)
+	})
+
+	var out []*store.Job
+	for _, p := range order {
+		if len(out) >= n || ctx.Err() != nil {
+			break
+		}
+		j, err := c.st.GetJob(ctx, p.id)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			// A failed read says nothing about the job; leave it listed.
+			c.log.Warn("could not read a job to check whether it started", "job", p.id, "error", err)
+			continue
+		}
+		live := err == nil && j.State == store.JobQueued && !j.RemovedFromQueue() &&
+			j.InstallationID != "" && !IsDemoID(j.InstallationID)
+		if live && c.githubHeld(j.InstallationID, now) {
+			continue
+		}
+		c.startChecksMu.Lock()
+		delete(c.startChecks, p.id)
+		if live {
+			if c.startChecked == nil {
+				c.startChecked = map[string]time.Time{}
+			}
+			c.startChecked[p.id] = now
+		}
+		c.startChecksMu.Unlock()
+		if live {
+			out = append(out, j)
+		}
+	}
+	return out
 }
 
 // jobRecoveryLoop is the single owner of checking known unfinished jobs against

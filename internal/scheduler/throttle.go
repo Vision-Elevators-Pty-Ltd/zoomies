@@ -34,16 +34,27 @@ const (
 	StaleThrottleReset = 10 * time.Minute
 
 	// LoadPerCPUOverwhelmed is the one-minute load average per CPU at which a
-	// host counts as overwhelmed: twice as many runnable tasks as there are
-	// cores to run them, which is the shape a machine takes when its CPU
-	// occupancy has already pinned at 100% and stopped saying anything.
-	// LoadPerCPUCalm is where it is calm again -- one runnable task per core,
-	// where nothing is queued behind anything.
+	// host whose CPU is busy counts as overwhelmed: twice as many runnable
+	// tasks as there are cores to run them, which is the shape a machine takes
+	// when its CPU occupancy has already pinned at 100% and stopped saying
+	// anything. LoadPerCPUCalm is where it is calm again -- one runnable task
+	// per core, where nothing is queued behind anything.
+	//
+	// Both apply only while CPU occupancy is at or above cpuCalmPercent. Linux
+	// counts a task waiting on disk (D state) in the load average as well as
+	// one waiting for a core, so an IO-heavy CI host reads a load of one or two
+	// per core with half its CPU idle. Judged on load alone such a host was
+	// throttled at 25-45% CPU, and then sat between the two load bands for
+	// ever, never calm enough to climb down: fewer slots bought nothing,
+	// because the cores were never what it was short of. A host whose CPU has
+	// headroom is not CPU-contended, whatever its load says. A host that
+	// reports no CPU figure is judged on load alone, as before.
 	LoadPerCPUOverwhelmed = 2.0
 	LoadPerCPUCalm        = 1.0
 	// cpuCalmPercent is the CPU occupancy below which a host is calm, and it
 	// is the same figure that releases the admission hold, so the two never
-	// disagree about whether a host has recovered.
+	// disagree about whether a host has recovered. It is also the occupancy
+	// below which the load average is not read as CPU pressure.
 	cpuCalmPercent = 85.0
 )
 
@@ -52,10 +63,12 @@ const (
 // on now. It is pure, and the controller persists the result when it differs.
 //
 // Three things can be true of a host with a fresh sample. It is overwhelmed:
-// the CPU hold has tripped, the load average is past twice its cores, or its
-// memory is at the reserve -- and then it climbs a rung, if ThrottleStep has
-// passed since the last one. It is calm: CPU under 85%, load under one per
-// core, memory above the reserve -- and then a calm streak runs, and after
+// the CPU hold has tripped, the load average is past twice its cores while its
+// CPU is at 85% or more, or its memory is at the reserve -- and then it climbs
+// a rung, if ThrottleStep has passed since the last one. It is calm: CPU under
+// 85% (load is not read then: see LoadPerCPUOverwhelmed), or under one load
+// per core where the CPU is busier, and memory above the reserve -- and then a
+// calm streak runs, and after
 // ThrottleRecovery it climbs down a rung and the streak starts again. Or it
 // is neither, in the band between, where the rung is kept and the streak is
 // broken: a host at 90% CPU is not overwhelmed, and it is not a host to give
@@ -136,14 +149,17 @@ func NextThrottle(h *store.Host, now time.Time) store.HostThrottle {
 // share -- and the load average is what says a host has been pushed past its
 // cores by anything at all, quotas included: CFS dequeues a throttled task, so
 // load climbs past the core count only when more is runnable than the plan
-// allows for.
+// allows for. The load average is read that way only while the CPU is busy,
+// because it also counts tasks waiting on disk: a host at 45% CPU with a load
+// of two and a half per core is waiting on its disks, not its cores, and
+// taking its slots away does not give it more disk.
 func hostOverwhelmed(h *store.Host) (bool, string) {
 	u := h.Usage
 	if u.CPUHeld && h.UnlimitedRunners > 0 {
 		return true, fmt.Sprintf("CPU has been at or above 95%% for 30 s with %s here that no CPU limit binds",
 			plural(h.UnlimitedRunners, "runner"))
 	}
-	if u.LoadAverage1 != nil && h.CPUs > 0 && *u.LoadAverage1 >= LoadPerCPUOverwhelmed*float64(h.CPUs) {
+	if loadIsCPUPressure(u) && u.LoadAverage1 != nil && h.CPUs > 0 && *u.LoadAverage1 >= LoadPerCPUOverwhelmed*float64(h.CPUs) {
 		return true, fmt.Sprintf("the 1-minute load average is %.1f, at least twice the host's %d CPUs", *u.LoadAverage1, h.CPUs)
 	}
 	if v := u.MemoryAvailableMB; v != nil && *v <= h.MemoryReserve() {
@@ -160,6 +176,11 @@ func hostOverwhelmed(h *store.Host) (bool, string) {
 // three quarters of the machine or less, so a host whose runners are all
 // inside them falls under 85% the moment the quotas take. A host that stays
 // above it is carrying something the quotas do not bind.
+//
+// The load bar is only read where the CPU is at or above 85%. Below that the
+// cores have headroom, and a load past one per core is tasks waiting on disk:
+// a host held off calm by it would keep its throttle for as long as its
+// builds read and write, which on a CI host is always.
 func hostCalm(h *store.Host) bool {
 	u := h.Usage
 	if u.CPUHeld {
@@ -171,13 +192,23 @@ func hostCalm(h *store.Host) bool {
 	if v := u.UnlentCPUPercent(); v != nil && *v >= cpuCalmPercent {
 		return false
 	}
-	if u.LoadAverage1 != nil && h.CPUs > 0 && *u.LoadAverage1 >= LoadPerCPUCalm*float64(h.CPUs) {
+	if loadIsCPUPressure(u) && u.LoadAverage1 != nil && h.CPUs > 0 && *u.LoadAverage1 >= LoadPerCPUCalm*float64(h.CPUs) {
 		return false
 	}
 	if v := u.MemoryAvailableMB; v != nil && *v <= h.MemoryReserve() {
 		return false
 	}
 	return true
+}
+
+// loadIsCPUPressure reports whether a host's load average may be read as
+// pressure on its CPU: only when the CPU is at or above cpuCalmPercent, since
+// the load average counts tasks waiting on disk too. CPUPercent is the whole
+// host's occupancy, lent CPU included (a busy core is a busy core whoever
+// was lent it), and a host that reports no CPU figure cannot say its cores
+// have room, so its load is read as before.
+func loadIsCPUPressure(u store.HostUsage) bool {
+	return u.CPUPercent == nil || *u.CPUPercent >= cpuCalmPercent
 }
 
 // ThrottleFloorFactor is the least CPU factor a throttle may apply on a host

@@ -637,8 +637,15 @@ jobs:
           make cover-merge COVERDIRS="$dirs"
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1 >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain merged coverage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: merged-coverage
+          path: coverage.out
+          if-no-files-found: error
       - name: Upload coverage to Codecov
-        if: ${{ github.actor != 'dependabot[bot]' }}
+        # Forks retain their report without requiring an upstream Codecov setup.
+        if: ${{ github.repository == 'eyupio/zoomies' && github.actor != 'dependabot[bot]' }}
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           use_oidc: true

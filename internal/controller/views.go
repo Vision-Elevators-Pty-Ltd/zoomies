@@ -237,6 +237,12 @@ type HostView struct {
 	ReservedCPUs     float64 `json:"reserved_cpus,omitempty"`
 	ReservedMemoryMB int64   `json:"reserved_memory_mb,omitempty"`
 	ReservedKnown    bool    `json:"reserved_known"`
+	// MemoryBooking is how the last pass's overcommitted memory ledger saw
+	// this host: what its runners are booked for (by job history, under
+	// scheduler.memory_booking=history) against their sizes, and the machine
+	// (scheduler.machine_label) whose one ceiling they count against with the
+	// other agents there. Absent with memory overcommit off.
+	MemoryBooking *scheduler.HostBooking `json:"memory_booking,omitempty"`
 	// ResourcesKnown is whether this host has reported what machine it is at
 	// all. An agent too old to say is placed by slots alone, which is what
 	// keeps an upgrade from emptying a fleet -- and the page has to say so,
@@ -413,6 +419,7 @@ func (c *Controller) HostView(h *store.Host) HostView {
 		out.ReservedMemoryMB = res.MemoryMB
 		out.ReservedKnown = true
 	}
+	out.MemoryBooking = c.bookingOn(h.ID)
 	if len(h.BackendInfo) > 0 {
 		out.BackendInfo = make([]BackendInfoView, 0, len(h.BackendInfo))
 		for _, b := range h.BackendInfo {

@@ -720,6 +720,19 @@ var registry = buildRegistry([]Setting{
 		Summary: "How much of a starting runner's size is held against a host's measured free memory and CPU until the host's next sample contains it, in percent (10-100). A job with a history is charged at least what it is known to need. 100 charges the whole size.",
 	},
 	{
+		Key: "scheduler.memory_booking", Label: "Memory booking", Env: "ZOOMIES_MEMORY_BOOKING", Kind: KindEnum, Scope: ScopeInstance, Live: true,
+		Choices: []string{"history", "typed"},
+		Summary: "What a runner is booked for where memory is overcommitted. History books it at what its job is known to use (the ninetieth percentile of the job's recent peaks plus the booking headroom, or before its job is known the larger of its pool's figure and the heaviest job waiting), never above its size, and at its size where fewer than five runs are known. Typed books every runner at its size.",
+	},
+	{
+		Key: "scheduler.memory_booking_headroom_percent", Label: "Memory booking headroom", Env: "ZOOMIES_MEMORY_BOOKING_HEADROOM_PERCENT", Kind: KindInt, Scope: ScopeInstance, Live: true,
+		Summary: "How much more than the ninetieth percentile of a job's recent peaks a runner is booked for under history booking, in percent (0-100).",
+	},
+	{
+		Key: "scheduler.machine_label", Label: "Machine label", Env: "ZOOMIES_MACHINE_LABEL", Kind: KindString, Scope: ScopeInstance, Live: true,
+		Summary: "The host label whose value names the machine an agent runs on. Agents with the same value share one memory ceiling and one measured free memory, because each reports the whole machine. Empty treats every host as a machine of its own.",
+	},
+	{
 		Key: "scheduler.cpu_overcommit_percent", Label: "CPU overcommit", Env: "ZOOMIES_CPU_OVERCOMMIT_PERCENT", Kind: KindInt, Scope: ScopeInstance, Live: true,
 		Summary: "How much of each host's allocatable CPU may be booked, in percent (100-400). 100 books the machine once. Runners keep their real CPU quotas, and new starts are still held when the host's real CPU is at 85% or more.",
 	},

@@ -15453,6 +15453,7 @@ components:
           description: >-
             False until a pass has run, because zero would read as an idle machine rather
             than as a question nobody has answered yet.
+        memory_booking: { $ref: "#/components/schemas/HostMemoryBooking" }
         resources_known:
           type: boolean
           description: >-
@@ -15523,6 +15524,60 @@ components:
         last_heartbeat: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
 
+    HostMemoryBooking:
+      type: object
+      description: >-
+        How the last scheduling pass's overcommitted memory ledger saw this host. Absent with
+        memory overcommit off, where every runner is booked its size against its own host.
+      required: [mode, booked_memory_mb, typed_memory_mb, machine_booked_memory_mb, machine_typed_memory_mb, overcommitted]
+      properties:
+        mode:
+          type: string
+          enum: [history, typed]
+          description: >-
+            `scheduler.memory_booking`. History books a runner at what its job is known to use
+            (the ninetieth percentile of its recent peaks plus the booking headroom, or before its
+            job is known its pool's figure and the heaviest job waiting), never above its size.
+        booked_memory_mb:
+          type: integer
+          format: int64
+          description: What the live runners on this host are booked for.
+        typed_memory_mb:
+          type: integer
+          format: int64
+          description: Their whole sizes, which is what typed booking books.
+        by_history:
+          type: integer
+          description: How many of them are booked below their size.
+        machine:
+          type: string
+          description: >-
+            The value of `scheduler.machine_label` this host shares with other agents on one
+            machine. Empty for a host that is a machine of its own.
+        machine_hosts:
+          type: array
+          items: { type: string }
+          description: The agents on that machine.
+        machine_booked_memory_mb:
+          type: integer
+          format: int64
+          description: What every agent on the machine is booked for between them; this host's own when alone.
+        machine_typed_memory_mb:
+          type: integer
+          format: int64
+          description: Their whole sizes.
+        machine_ceiling_mb:
+          type: integer
+          format: int64
+          description: >-
+            What the machine may be booked for: its allocatable memory times the overcommit, once
+            for all of its agents.
+        overcommitted:
+          type: boolean
+          description: >-
+            Whether this ledger is the one the pass placed by: memory is overcommitted and the
+            host had a fresh sample. Otherwise the host is booked its runners' sizes against its
+            own allocatable memory.
     JoinToken:
       type: object
       properties:

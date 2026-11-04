@@ -16,6 +16,7 @@ import (
 var validatedEnums = map[string]func(c *Config, v string){
 	"scheduler.history_sizing":         func(c *Config, v string) { c.Scheduler.HistorySizing = v },
 	"scheduler.host_order":             func(c *Config, v string) { c.Scheduler.HostOrder = v },
+	"scheduler.memory_booking":         func(c *Config, v string) { c.Scheduler.MemoryBooking = v },
 	"scheduler.placement_mode":         func(c *Config, v string) { c.Scheduler.PlacementMode = v },
 	"scheduler.size_routing":           func(c *Config, v string) { c.Scheduler.SizeRouting = v },
 	"scheduler.auto_pools":             func(c *Config, v string) { c.Scheduler.AutoPools = v },
@@ -120,6 +121,7 @@ func TestTheRegistryChoicesAreTheOnesTheSchedulerAndStoreDefine(t *testing.T) {
 		}
 	}
 	sameSet("scheduler.host_order", scheduler.HostOrders)
+	sameSet("scheduler.memory_booking", scheduler.BookingModes)
 	sameSet("scheduler.size_routing", scheduler.SizeModes)
 	sameSet("scheduler.auto_pools", scheduler.SizeModes)
 	sameSet("scheduler.size_default_class", []string{string(store.SizeSmall), string(store.SizeMedium), string(store.SizeLarge)})

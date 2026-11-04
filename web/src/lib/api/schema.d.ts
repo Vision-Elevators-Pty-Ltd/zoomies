@@ -11074,6 +11074,7 @@ export interface components {
             reserved_memory_mb?: number;
             /** @description False until a pass has run, because zero would read as an idle machine rather than as a question nobody has answered yet. */
             reserved_known?: boolean;
+            memory_booking?: components["schemas"]["HostMemoryBooking"];
             /** @description Whether this host has reported what machine it is at all. An agent too old to say is placed by slots alone, which is what keeps an upgrade from emptying a fleet. */
             resources_known?: boolean;
             platform?: components["schemas"]["Platform"];
@@ -11120,6 +11121,47 @@ export interface components {
             last_heartbeat?: string;
             /** Format: date-time */
             created_at?: string;
+        };
+        /** @description How the last scheduling pass's overcommitted memory ledger saw this host. Absent with memory overcommit off, where every runner is booked its size against its own host. */
+        HostMemoryBooking: {
+            /**
+             * @description `scheduler.memory_booking`. History books a runner at what its job is known to use (the ninetieth percentile of its recent peaks plus the booking headroom, or before its job is known its pool's figure and the heaviest job waiting), never above its size.
+             * @enum {string}
+             */
+            mode: "history" | "typed";
+            /**
+             * Format: int64
+             * @description What the live runners on this host are booked for.
+             */
+            booked_memory_mb: number;
+            /**
+             * Format: int64
+             * @description Their whole sizes, which is what typed booking books.
+             */
+            typed_memory_mb: number;
+            /** @description How many of them are booked below their size. */
+            by_history?: number;
+            /** @description The value of `scheduler.machine_label` this host shares with other agents on one machine. Empty for a host that is a machine of its own. */
+            machine?: string;
+            /** @description The agents on that machine. */
+            machine_hosts?: string[];
+            /**
+             * Format: int64
+             * @description What every agent on the machine is booked for between them; this host's own when alone.
+             */
+            machine_booked_memory_mb: number;
+            /**
+             * Format: int64
+             * @description Their whole sizes.
+             */
+            machine_typed_memory_mb: number;
+            /**
+             * Format: int64
+             * @description What the machine may be booked for: its allocatable memory times the overcommit, once for all of its agents.
+             */
+            machine_ceiling_mb?: number;
+            /** @description Whether this ledger is the one the pass placed by: memory is overcommitted and the host had a fresh sample. Otherwise the host is booked its runners' sizes against its own allocatable memory. */
+            overcommitted: boolean;
         };
         JoinToken: {
             id?: string;

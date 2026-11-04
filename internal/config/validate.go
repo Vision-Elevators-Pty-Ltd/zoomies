@@ -1044,6 +1044,14 @@ func (c *Config) validateScheduler(add func(Finding)) {
 			Fix:    "set scheduler.memory_overcommit_percent back to 100 to book each host's memory once.",
 		})
 	}
+	c.refuseUnknownChoice(add, Finding{Code: "scheduler.memory_booking", Severity: SeverityError, Setting: "scheduler.memory_booking", Title: "unknown memory booking mode"}, c.Scheduler.MemoryBooking)
+	if c.Scheduler.MemoryBookingHeadroomPercent < 0 || c.Scheduler.MemoryBookingHeadroomPercent > 100 {
+		add(Finding{
+			Code: "scheduler.memory_booking_headroom_percent", Severity: SeverityError, Setting: "scheduler.memory_booking_headroom_percent",
+			Title: "memory_booking_headroom_percent must be between 0 and 100",
+			Fix:   "use 25 to book a runner a fourth more than its job's ninetieth-percentile peak.",
+		})
+	}
 	if c.Scheduler.StartChargePercent < 10 || c.Scheduler.StartChargePercent > 100 {
 		add(Finding{
 			Code: "scheduler.start_charge_percent", Severity: SeverityError, Setting: "scheduler.start_charge_percent",

@@ -279,6 +279,9 @@ scheduler:
   start_charge_percent: 100     # ZOOMIES_START_CHARGE_PERCENT: share of a starting runner's size held against measured free memory and CPU, 10–100; below 100 is warned about
   cpu_overcommit_percent: 100   # ZOOMIES_CPU_OVERCOMMIT_PERCENT: CPU each host may be booked for, 100–800; above 100 is warned about
   memory_overcommit_percent: 100 # ZOOMIES_MEMORY_OVERCOMMIT_PERCENT: memory each host may be booked for, 100–1000; above 100 is warned about
+  memory_booking: history       # ZOOMIES_MEMORY_BOOKING: history or typed: what a runner is booked for where memory is overcommitted
+  memory_booking_headroom_percent: 25 # ZOOMIES_MEMORY_BOOKING_HEADROOM_PERCENT: added to a job's ninetieth-percentile peak under history booking, 0–100
+  machine_label: host           # ZOOMIES_MACHINE_LABEL: hosts with the same value of this label are agents on one machine and share its memory ceiling; empty for none
 
 capacity_demand:
   destination_url: ""           # ZOOMIES_CAPACITY_DEMAND_URL (empty disables)
@@ -710,6 +713,9 @@ the validator says so with `limits.loopback`.
 | `scheduler.start_charge_percent` | `ZOOMIES_START_CHARGE_PERCENT` | at once | Start charge: How much of a starting runner's size is held against a host's measured free memory and CPU until the host's next sample contains it, in percent (10–100). A job with a history is charged at least what it is known to need. 100 charges the whole size. |
 | `scheduler.cpu_overcommit_percent` | `ZOOMIES_CPU_OVERCOMMIT_PERCENT` | at once | CPU overcommit: How much of each host's allocatable CPU may be booked, in percent (100–800). 100 books the machine once. Runners keep their real CPU quotas, and new starts are still held when the host's real CPU is at 85% or more. |
 | `scheduler.memory_overcommit_percent` | `ZOOMIES_MEMORY_OVERCOMMIT_PERCENT` | at once | Memory overcommit: How much of each host's allocatable memory may be booked, in percent (100–1000). 100 books the machine once. Above it, a runner still starts only where its size and the reserve are measured free on the real host, and containers keep their real limits. |
+| `scheduler.memory_booking` | `ZOOMIES_MEMORY_BOOKING` | at once | Memory booking: What a runner is booked for where memory is overcommitted. History books it at what its job is known to use (the ninetieth percentile of the job's recent peaks plus the booking headroom, or before its job is known the larger of its pool's figure and the heaviest job waiting), never above its size, and at its size where fewer than five runs are known. Typed books every runner at its size. See [the reconciliation invariants](architecture.md#reconciliation-invariants). |
+| `scheduler.memory_booking_headroom_percent` | `ZOOMIES_MEMORY_BOOKING_HEADROOM_PERCENT` | at once | Memory booking headroom: How much more than the ninetieth percentile of a job's recent peaks a runner is booked for under history booking, in percent (0-100). |
+| `scheduler.machine_label` | `ZOOMIES_MACHINE_LABEL` | at once | Machine label: The host label whose value names the machine an agent runs on. Agents with the same value share one memory ceiling and one measured free memory, because each reports the whole machine. Empty treats every host as a machine of its own. |
 | `scheduler.provision_timeout` | `ZOOMIES_PROVISION_TIMEOUT` | at once | Provision timeout: Fail a runner that never finishes registering, so a bad image does not hold a host slot for ever. |
 | `scheduler.scale_up_delay` | `ZOOMIES_SCALE_UP_DELAY` | at once | Scale-up delay: How long a job must have been queued before it counts as demand. It damps churn when jobs arrive in bursts; 0 reacts at once. |
 

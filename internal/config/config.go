@@ -918,6 +918,23 @@ type Scheduler struct {
 	// real CPU quotas, and the CPU pressure holds, throttling and the
 	// fit-the-machine checks read the real host.
 	CPUOvercommitPercent int `yaml:"cpu_overcommit_percent"`
+	// MemoryBooking is history or typed: what a runner is booked for in the
+	// overcommitted memory ledger (memory_overcommit_percent above 100, on a
+	// host with a fresh sample). History books it at what its job is known to
+	// use (the ninetieth percentile of the job's recent peaks plus
+	// MemoryBookingHeadroomPercent, or before its job is known the larger of
+	// its pool's figure and the heaviest job waiting on the pool), never above
+	// its size, and at its size wherever fewer than five runs are known. Typed
+	// books every runner at its size. The measured check, the reserve, the
+	// pressure holds and throttling are the same either way.
+	MemoryBooking                string `yaml:"memory_booking"`
+	MemoryBookingHeadroomPercent int    `yaml:"memory_booking_headroom_percent"`
+	// MachineLabel names the host label whose value says which machine an agent
+	// is on. Agents with the same value share one memory ceiling (the
+	// machine's booking memory once, against every runner on it) and one
+	// measured free memory, because each of them reports the whole machine.
+	// Empty treats every host as a machine of its own.
+	MachineLabel string `yaml:"machine_label"`
 	// StartChargePercent is how much of a starting runner's typed memory and
 	// CPU the measured check charges a host before the host's sample can
 	// contain the runner. A runner whose job has a history is charged at least
@@ -1300,6 +1317,11 @@ func Default() *Config {
 			MemoryOvercommitPercent: 100,
 			CPUOvercommitPercent:    100,
 			StartChargePercent:      100,
+			// History booking and machine sharing only act where memory is
+			// overcommitted, so at the default of 100 they change nothing.
+			MemoryBooking:                "history",
+			MemoryBookingHeadroomPercent: 25,
+			MachineLabel:                 "host",
 			// Everything about size classes is off until an operator turns it
 			// on, and the figures below are what it does when they do. They are
 			// held equal to scheduler.DefaultSizeConfig by a test in the

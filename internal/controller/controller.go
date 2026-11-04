@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -354,6 +355,9 @@ type Controller struct {
 	// because an operator would trust it. It is at most one pass old, which is
 	// the same age as the plan the problems drawer already reports.
 	reserved map[string]scheduler.Reservation
+	// bookings is how the last pass's overcommitted memory ledger saw each
+	// host (scheduler.Plan.Bookings), for the Hosts page.
+	bookings map[string]*scheduler.HostBooking
 	// lease is this controller's claim on the database, renewed on a timer.
 	// leaseLost is set when a renewal found somebody else holding it, which is
 	// the fleet's worst state: two schedulers, both certain they are the only
@@ -1099,15 +1103,18 @@ func (c *Controller) policy() scheduler.Policy {
 		ScaleUpDelay: c.cfg().Scheduler.ScaleUpDelay,
 		// The policy is built from the live settings on every pass, so a change
 		// on the Settings page is in the next pass's booking.
-		MemoryOvercommitPercent: c.cfg().Scheduler.MemoryOvercommitPercent,
-		CPUOvercommitPercent:    c.cfg().Scheduler.CPUOvercommitPercent,
-		StartChargePercent:      c.cfg().Scheduler.StartChargePercent,
-		MaxRunnerLifetime:       c.cfg().Scheduler.MaxRunnerLifetime,
-		ProvisionTimeout:        c.cfg().Scheduler.ProvisionTimeout,
-		DrainTimeout:            c.cfg().Scheduler.DrainTimeout,
-		MaxCreatesPerTick:       c.cfg().Scheduler.MaxCreatesPerTick,
-		MaxRunners:              c.cfg().Limits.Runners,
-		Interval:                c.schedulerInterval(),
+		MemoryOvercommitPercent:      c.cfg().Scheduler.MemoryOvercommitPercent,
+		CPUOvercommitPercent:         c.cfg().Scheduler.CPUOvercommitPercent,
+		StartChargePercent:           c.cfg().Scheduler.StartChargePercent,
+		MemoryBooking:                c.cfg().Scheduler.MemoryBooking,
+		MemoryBookingHeadroomPercent: c.cfg().Scheduler.MemoryBookingHeadroomPercent,
+		MachineLabel:                 c.cfg().Scheduler.MachineLabel,
+		MaxRunnerLifetime:            c.cfg().Scheduler.MaxRunnerLifetime,
+		ProvisionTimeout:             c.cfg().Scheduler.ProvisionTimeout,
+		DrainTimeout:                 c.cfg().Scheduler.DrainTimeout,
+		MaxCreatesPerTick:            c.cfg().Scheduler.MaxCreatesPerTick,
+		MaxRunners:                   c.cfg().Limits.Runners,
+		Interval:                     c.schedulerInterval(),
 	}
 }
 
@@ -1509,6 +1516,20 @@ func (c *Controller) setLastPlan(p scheduler.Plan) {
 	defer c.mu.Unlock()
 	c.lastPlan = &p
 	c.lastPlanAt = c.Now()
+	c.bookings = p.Bookings
+}
+
+// bookingOn is how the last pass booked a host's memory, nil where memory is
+// not overcommitted or no pass has run.
+func (c *Controller) bookingOn(id string) *scheduler.HostBooking {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if b := c.bookings[id]; b != nil {
+		copy := *b
+		copy.MachineHosts = slices.Clone(b.MachineHosts)
+		return &copy
+	}
+	return nil
 }
 
 // setReserved records what each host had promised away in the snapshot the

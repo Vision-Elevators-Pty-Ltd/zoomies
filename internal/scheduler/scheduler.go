@@ -80,6 +80,10 @@ type Snapshot struct {
 	// here. An empty mode is off.
 	JobHistory    map[store.JobUsageKey][]store.JobPeak
 	HistorySizing string
+	// Booking is the history scheduler.memory_booking=history books runners
+	// from: each pool's recent runs, and the job each runner is running, whose
+	// own runs are in JobHistory. Nil books every runner at its size.
+	Booking *BookingInputs
 	// HostOrder is scheduler.host_order: the order placement prefers hosts that
 	// can all take a runner in -- see HostOrderHeadroom and the constants
 	// beside it. An empty value is headroom, which is what every fleet had
@@ -131,6 +135,17 @@ type Policy struct {
 	// (scheduler.start_charge_percent). 100, or anything outside 1-99, charges
 	// it whole. See startCharge.
 	StartChargePercent int
+	// MemoryBooking is scheduler.memory_booking: history books a runner in the
+	// overcommitted memory ledger at what its job is known to use, plus
+	// MemoryBookingHeadroomPercent, never above its size; typed, or anything
+	// else, books it at its size. It applies only where memory is overcommitted
+	// and the host has a fresh sample. See booker.
+	MemoryBooking                string
+	MemoryBookingHeadroomPercent int
+	// MachineLabel is scheduler.machine_label: hosts carrying the same value of
+	// this label are agents on one machine, and share its memory ceiling and
+	// its measured free memory. Empty treats every host as a machine of its own.
+	MachineLabel string
 	// ScaleUpDelay is how long a job must have been queued before it counts as
 	// demand, which damps churn when jobs arrive in bursts.
 	ScaleUpDelay time.Duration
@@ -364,6 +379,11 @@ type Plan struct {
 	// nearest pool refused it. They will never run, so the UI surfaces them as
 	// a configuration problem.
 	Unmatched []UnmatchedJob `json:"unmatched,omitempty"`
+	// Bookings is how the overcommitted memory ledger saw each host when the
+	// pass began, by host ID: what its runners are booked for against their
+	// sizes, and the machine they count against. Nil with memory overcommit
+	// off, where every runner is booked its size against its own host.
+	Bookings map[string]*HostBooking `json:"-"`
 }
 
 // UnmatchedJob is a queued job no pool claimed, and why.
@@ -384,9 +404,13 @@ func Decide(s Snapshot) Plan {
 	demand, unmatched := assign(pools, s.Jobs, targetsOf(s.Installations))
 
 	t := &tick{
-		now:                s.Now,
-		policy:             s.Policy,
-		hosts:              newHostSetCharged(s.Hosts, pools, s.Runners, s.Now, s.Policy.MemoryOvercommitPercent, s.Policy.CPUOvercommitPercent, s.Policy.StartChargePercent),
+		now:    s.Now,
+		policy: s.Policy,
+		hosts: newHostSetFrom(s.Hosts, pools, s.Runners, s.Now, ledger{
+			overcommitPercent: s.Policy.MemoryOvercommitPercent, cpuOvercommitPercent: s.Policy.CPUOvercommitPercent,
+			startChargePercent: s.Policy.StartChargePercent, machineLabel: s.Policy.MachineLabel,
+			book: newBooker(s.Policy.MemoryBooking, s.Policy.MemoryBookingHeadroomPercent, s.Booking, s.JobHistory, pools, demand),
+		}),
 		budget:             s.Policy.MaxCreatesPerTick,
 		activeByRepository: s.ActiveByRepository,
 		poolCount:          len(pools),
@@ -404,7 +428,7 @@ func Decide(s Snapshot) Plan {
 		t.budget = math.MaxInt
 	}
 
-	plan := Plan{Pools: make([]PoolPlan, 0, len(pools)), Unmatched: unmatched}
+	plan := Plan{Pools: make([]PoolPlan, 0, len(pools)), Unmatched: unmatched, Bookings: t.hosts.bookings}
 	for _, p := range pools {
 		pp := t.decidePool(p, s.Runners[p.ID], demand[p.ID])
 		plan.Pools = append(plan.Pools, pp)
@@ -1053,6 +1077,9 @@ func (t *tick) grant(p *store.Pool, plan *PoolPlan, runners []*store.Runner, que
 				sizePhrase(size.CPUs, size.MemoryMB), sizePhrase(p.Resources.CPUs, p.Resources.MemoryMB))
 		}
 	}
+	if b := placed[0].booking; b != "" {
+		reason += " (" + b + ")"
+	}
 	switch {
 	case enforce:
 		note := fmt.Sprintf("placed for the jobs waiting, which need %s", need)
@@ -1333,6 +1360,19 @@ type hostSet struct {
 	startChargePercent int
 	bookedMemory       map[string]int64
 	measuredMemory     map[string]int64
+	// book books runners by their jobs' history in the overcommitted ledger
+	// (scheduler.memory_booking=history); nil books every runner whole.
+	// byHistory is the hosts whose memory is booked in that ledger: memory
+	// overcommit is on and the host has a fresh sample. siblings is, for a host
+	// that is one of several agents on one machine (scheduler.machine_label),
+	// the other agents there with a fresh sample: they share one booking
+	// ceiling and one measurement, so what is placed on one is taken from all.
+	// bookings is what the pass started from, for the Hosts page and reasons;
+	// it is kept only with memory overcommit on. All four are nil where unused.
+	book      *booker
+	byHistory map[string]bool
+	siblings  map[string][]string
+	bookings  map[string]*HostBooking
 	// order is scheduler.host_order; see Snapshot.HostOrder.
 	order string
 	// need is set while a runner is being placed for a known requirement
@@ -1448,9 +1488,45 @@ func startCharge(typedMB, needMB int64, percent int) int64 {
 // startChargePercent of their size against the measured check (startCharge).
 // The host's reserve, the CPU holds, throttling and the booking are untouched.
 func newHostSetCharged(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, now time.Time, overcommitPercent, cpuOvercommitPercent, startChargePercent int) *hostSet {
+	return newHostSetFrom(hosts, pools, runners, now, ledger{
+		overcommitPercent: overcommitPercent, cpuOvercommitPercent: cpuOvercommitPercent, startChargePercent: startChargePercent,
+	})
+}
+
+// ledger is how a pass books memory and CPU: the overcommits, the start charge,
+// how runners are booked in the overcommitted memory ledger (book; nil books
+// each whole) and the label that says which hosts are agents on one machine.
+type ledger struct {
+	overcommitPercent, cpuOvercommitPercent, startChargePercent int
+	book                                                        *booker
+	machineLabel                                                string
+}
+
+// newHostSetFrom is the host set a pass places against.
+//
+// With memory overcommit on, two things are added to newHostSetCharged's
+// ledger, and both apply only to hosts with a fresh sample, which is what the
+// overcommitted ledger has always required:
+//
+//   - a runner is booked at what its job is known to use, not its size, where
+//     scheduler.memory_booking=history says so (booker.runner); and
+//   - agents on one machine (the same value of scheduler.machine_label) share
+//     one ceiling, the machine's booking memory once, against what all their
+//     runners are booked for, and one measurement: the lowest free memory any
+//     of them sampled, less every start on the machine that sample cannot
+//     contain. Each agent reports the whole machine, so without this each was
+//     booked for all of it, and two agents on one box booked it twice.
+//
+// The measurement is shared whether memory is overcommitted or not, because it
+// is a fact about the machine; the ledger is shared only when overcommitted,
+// because a machine booked once per agent at 100% is what an operator who
+// split it by reserve asked for. A host with no label, or the only one with
+// its value, is placed exactly as before.
+func newHostSetFrom(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, now time.Time, opts ledger) *hostSet {
+	overcommitPercent, cpuOvercommitPercent := opts.overcommitPercent, opts.cpuOvercommitPercent
 	overcommit := overcommitPercent > 100
 	cpuOvercommit := cpuOvercommitPercent > 100
-	pct := chargePercent(startChargePercent)
+	pct := chargePercent(opts.startChargePercent)
 	hs := &hostSet{
 		cpuOvercommit:      cpuOvercommit,
 		startChargePercent: int(pct),
@@ -1479,6 +1555,15 @@ func newHostSetCharged(hosts []*store.Host, pools []*store.Pool, runners map[str
 	// three times over: 73% of Decide on a quiet fleet of a hundred pools in a
 	// profile.
 	totals := totalsByHost(hs.hosts, pools, runners)
+	// What they are booked for in the overcommitted ledger, where it differs
+	// from what they are charged: by history, or across a machine's agents.
+	groups := machineGroups(hs.hosts, opts.machineLabel)
+	var booked map[string]*HostBooking
+	if overcommit {
+		hs.book = opts.book
+		booked = bookingTotals(hs.hosts, pools, runners, opts.book)
+		hs.bookings = booked
+	}
 	for i, h := range hs.hosts {
 		t := totals[i]
 		// One sum, shared with the host view: what the page shows a host has
@@ -1493,7 +1578,21 @@ func newHostSetCharged(hosts []*store.Host, pools []*store.Pool, runners map[str
 		hs.promisedMemory[h.ID] = l.MemoryMB
 		measured := h.Usage.Fresh(now) && h.Usage.MemoryAvailableMB != nil
 		if overcommit && measured {
-			l.MemoryMB = BookingMemoryMB(h, overcommitPercent) - t.reserved.MemoryMB
+			l.MemoryMB = BookingMemoryMB(h, overcommitPercent) - booked[h.ID].BookedMemoryMB
+			if hs.byHistory == nil {
+				hs.byHistory = map[string]bool{}
+			}
+			hs.byHistory[h.ID] = true
+		}
+		if overcommit {
+			hb := booked[h.ID]
+			hb.Mode = BookingTyped
+			if opts.book != nil {
+				hb.Mode = BookingHistory
+			}
+			hb.Overcommitted = measured
+			hb.MachineBookedMemoryMB, hb.MachineTypedMemoryMB = hb.BookedMemoryMB, hb.TypedMemoryMB
+			hb.MachineCeilingMB = BookingMemoryMB(h, overcommitPercent)
 		}
 		if cpuOvercommit && h.Usage.Fresh(now) && h.Usage.UnlentCPUPercent() != nil {
 			l.CPUs = BookingCPUs(h, cpuOvercommitPercent) - t.reserved.CPUs
@@ -1544,7 +1643,100 @@ func newHostSetCharged(hosts []*store.Host, pools []*store.Pool, runners map[str
 		}
 		hs.left[h.ID] = l
 	}
+	for _, m := range slices.Sorted(maps.Keys(groups)) {
+		hs.shareMachine(m, groups[m], pools, runners, overcommit, overcommitPercent, pct, booked)
+	}
 	return hs
+}
+
+// shareMachine puts the agents of one machine on one ceiling and one
+// measurement (see newHostSetFrom). Only agents with a fresh sample share
+// them; one without is booked on its own, as any unmeasured host is, but its
+// runners still count against the machine.
+func (hs *hostSet) shareMachine(machine string, members []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner,
+	overcommit bool, overcommitPercent int, pct int64, booked map[string]*HostBooking) {
+	var fresh []*store.Host
+	var sample *store.Host
+	for _, h := range members {
+		if !h.Usage.Fresh(hs.now) || h.Usage.MemoryAvailableMB == nil {
+			continue
+		}
+		fresh = append(fresh, h)
+		if sample == nil || *h.Usage.MemoryAvailableMB < *sample.Usage.MemoryAvailableMB {
+			sample = h
+		}
+	}
+	if len(fresh) == 0 {
+		return
+	}
+	// One measurement: the lowest any agent sampled, less every start on the
+	// machine that sample cannot contain yet, and, overcommitted, the largest
+	// of the agents' reserves.
+	pending := pendingAgainst(members, pools, runners, sample)
+	if pct < 100 {
+		pending = pending * pct / 100
+	}
+	available := *sample.Usage.MemoryAvailableMB - pending
+	if overcommit {
+		var reserve int64
+		for _, h := range fresh {
+			reserve = max(reserve, h.MemoryReserve())
+		}
+		available -= reserve
+	}
+	available = max(available, 0)
+	// One ceiling: the machine's booking memory once, against what every agent
+	// on it is booked for.
+	var ceiling, sum, typed int64
+	var names []string
+	if overcommit {
+		for i, h := range fresh {
+			c := BookingMemoryMB(h, overcommitPercent)
+			if i == 0 || c < ceiling {
+				ceiling = c
+			}
+		}
+		for _, h := range members {
+			sum += booked[h.ID].BookedMemoryMB
+			typed += booked[h.ID].TypedMemoryMB
+			names = append(names, hostName(h))
+		}
+	}
+	if hs.siblings == nil {
+		hs.siblings = map[string][]string{}
+	}
+	for _, h := range fresh {
+		for _, o := range fresh {
+			if o.ID != h.ID {
+				hs.siblings[h.ID] = append(hs.siblings[h.ID], o.ID)
+			}
+		}
+		hs.measuredMemory[h.ID] = available
+		if overcommit {
+			hs.bookedMemory[h.ID] = ceiling - sum
+		}
+		hs.syncMemory(h.ID)
+	}
+	if overcommit {
+		for _, h := range members {
+			hb := booked[h.ID]
+			hb.Machine, hb.MachineHosts = machine, names
+			if hb.Overcommitted {
+				hb.MachineBookedMemoryMB, hb.MachineTypedMemoryMB, hb.MachineCeilingMB = sum, typed, ceiling
+			}
+		}
+	}
+}
+
+// syncMemory sets the memory left on h to the tighter of its booking and its
+// measurement, as every change to either does.
+func (hs *hostSet) syncMemory(id string) {
+	l := hs.left[id]
+	l.MemoryMB = hs.bookedMemory[id]
+	if m, ok := hs.measuredMemory[id]; ok {
+		l.MemoryMB = min(l.MemoryMB, m)
+	}
+	hs.left[id] = l
 }
 
 // placement is one runner placed by a pass: the host it goes on and, where no
@@ -1556,6 +1748,9 @@ type placement struct {
 	// raised says size is larger than the standard, not smaller: the runner
 	// was sized up to what the jobs waiting are known to need.
 	raised bool
+	// booking says how the runner was booked in the overcommitted ledger, for
+	// the reason; empty where it was booked its size against its own host.
+	booking string
 }
 
 // place reserves up to n slots for the pool and returns the chosen host IDs.
@@ -1620,14 +1815,24 @@ func (hs *hostSet) placeAvoiding(p *store.Pool, n int, avoid map[string]bool) []
 		if hs.need != nil {
 			needMB, needCPUs = hs.need.MemoryMB, hs.need.CPUs
 		}
-		hs.bookedMemory[h.ID] -= res.MemoryMB
-		l.MemoryMB = hs.bookedMemory[h.ID]
-		if m, ok := hs.measuredMemory[h.ID]; ok {
-			m -= startCharge(res.MemoryMB, needMB, hs.startChargePercent)
-			hs.measuredMemory[h.ID] = m
-			l.MemoryMB = min(l.MemoryMB, m)
+		// In the overcommitted ledger the booking is what the runner is
+		// booked for (booker.start), and on a machine of several agents both
+		// figures are the machine's, so they are taken from every agent there.
+		book := res.MemoryMB
+		if hs.byHistory[h.ID] {
+			book = hs.book.start(p, res.MemoryMB, hs.need)
 		}
+		charge := startCharge(res.MemoryMB, needMB, hs.startChargePercent)
 		hs.left[h.ID] = l
+		for _, id := range append([]string{h.ID}, hs.siblings[h.ID]...) {
+			if id == h.ID || hs.byHistory[id] {
+				hs.bookedMemory[id] -= book
+			}
+			if m, ok := hs.measuredMemory[id]; ok {
+				hs.measuredMemory[id] = m - charge
+			}
+			hs.syncMemory(id)
+		}
 		hs.promisedMemory[h.ID] -= res.MemoryMB
 		hs.ours[h.ID] = true
 		if cpu, ok := hs.observedCPU[h.ID]; ok {
@@ -1637,7 +1842,7 @@ func (hs *hostSet) placeAvoiding(p *store.Pool, n int, avoid map[string]bool) []
 			}
 			hs.observedCPU[h.ID] = max(cpu-charge, 0)
 		}
-		out = append(out, placement{hostID: h.ID, size: size, raised: raised})
+		out = append(out, placement{hostID: h.ID, size: size, raised: raised, booking: hs.bookingPhrase(h, book, res.MemoryMB)})
 	}
 	return out
 }
@@ -1795,15 +2000,88 @@ func (hs *hostSet) memoryLeft(h *store.Host, p *store.Pool) int64 {
 	// asking: comparing it with the size is then asking whether the charge
 	// fits. The booking is still asked for the whole size. At a charge of 100
 	// this is exactly the room left.
-	if m, ok := hs.measuredMemory[h.ID]; ok && hs.startChargePercent < 100 {
-		typed := Reserve(p, h).MemoryMB
+	//
+	// The overcommitted ledger is read the same way: a runner booked for less
+	// than its size by its pool's history (scheduler.memory_booking=history)
+	// asks the booking for that much, so the booking is read as larger by the
+	// difference. With every runner booked whole and charged whole this is
+	// exactly the room left.
+	typed := Reserve(p, h).MemoryMB
+	var cheaper int64
+	if hs.byHistory[h.ID] {
+		cheaper = typed - hs.book.start(p, typed, hs.need)
+	}
+	m, ok := hs.measuredMemory[h.ID]
+	if cheaper <= 0 && (!ok || hs.startChargePercent >= 100) {
+		return hs.left[h.ID].MemoryMB
+	}
+	booked := hs.bookedMemory[h.ID] + cheaper
+	if !ok {
+		return booked
+	}
+	if hs.startChargePercent < 100 {
 		var needMB int64
 		if hs.need != nil {
 			needMB = hs.need.MemoryMB
 		}
-		return min(hs.bookedMemory[h.ID], m+typed-startCharge(typed, needMB, hs.startChargePercent))
+		m += typed - startCharge(typed, needMB, hs.startChargePercent)
 	}
-	return hs.left[h.ID].MemoryMB
+	return min(booked, m)
+}
+
+// shortOfMemory says, of a host short of memory for a runner of p, which half
+// ran out: the booking, with what it is booked for and how, or the measured
+// free memory. Empty where neither says more than "short of memory".
+func (hs *hostSet) shortOfMemory(h *store.Host, p *store.Pool) string {
+	typed := Reserve(p, h).MemoryMB
+	if hb := hs.bookings[h.ID]; hb != nil && hs.byHistory[h.ID] {
+		book := hs.book.start(p, typed, hs.need)
+		where := "it"
+		if hb.Machine != "" && len(hs.siblings[h.ID]) > 0 {
+			where = "machine " + naming.ForSentence(hb.Machine)
+		}
+		booked := hb.MachineCeilingMB - hs.bookedMemory[h.ID]
+		if hs.bookedMemory[h.ID] < book {
+			how := ""
+			if hb.Mode == BookingHistory {
+				how = fmt.Sprintf(" by job history (%s typed)", formatMB(hb.MachineTypedMemoryMB))
+			}
+			return fmt.Sprintf("%s: %s has %s of %s booked%s, and a new runner books %s of its %s",
+				naming.ForSentence(h.Name), where, formatMB(max(booked, 0)), formatMB(hb.MachineCeilingMB), how, formatMB(book), formatMB(typed))
+		}
+	}
+	if m, ok := hs.measuredMemory[h.ID]; ok {
+		var needMB int64
+		if hs.need != nil {
+			needMB = hs.need.MemoryMB
+		}
+		if charge := startCharge(typed, needMB, hs.startChargePercent); m < charge {
+			return fmt.Sprintf("%s: it has %s measured free past its reserve and pending starts, and a start is charged %s",
+				naming.ForSentence(h.Name), formatMB(max(m, 0)), formatMB(charge))
+		}
+	}
+	return ""
+}
+
+// bookingPhrase says, for the reason of a runner just placed on h, how it was
+// booked and how much of the ceiling is now booked: "booked 10 GB of its 32 GB
+// by job history; 150 GB of 185 GB booked on machine ci-nl-01". Empty where the
+// host is not booked in the overcommitted ledger.
+func (hs *hostSet) bookingPhrase(h *store.Host, book, size int64) string {
+	hb := hs.bookings[h.ID]
+	if hb == nil || !hs.byHistory[h.ID] {
+		return ""
+	}
+	where := "on " + hostName(h)
+	if hb.Machine != "" && len(hs.siblings[h.ID]) > 0 {
+		where = "on machine " + hb.Machine
+	}
+	ceiling := hb.MachineCeilingMB
+	now := fmt.Sprintf("%s of %s booked %s", formatMB(max(ceiling-hs.bookedMemory[h.ID], 0)), formatMB(ceiling), where)
+	if book < size {
+		return fmt.Sprintf("booked %s of its %s by job history; %s", formatMB(book), formatMB(size), now)
+	}
+	return fmt.Sprintf("booked its %s; %s", formatMB(size), now)
 }
 
 // HostCanRun is the placement rule, in one place: a host may take a runner for
@@ -2023,6 +2301,9 @@ func (hs *hostSet) why(p *store.Pool) blockage {
 				lowDisk++
 			case alloc.MemoryKnown && left.MemoryMB < want.MemoryMB:
 				shortMemory++
+				if detail == "" {
+					detail = hs.shortOfMemory(h, p)
+				}
 				if hs.ours[h.ID] {
 					committed++
 					waits = true

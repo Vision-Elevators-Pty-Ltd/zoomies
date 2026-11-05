@@ -393,7 +393,8 @@ type Plan struct {
 	// runner is running says it needs, for the runners whose need is above
 	// what they were created with (scheduler.history_raise). The controller
 	// turns each into a memory-valve rule (HistoryGrantFor). Nil with
-	// history_raise off.
+	// history_raise off, and where the snapshot had no Booking to say which
+	// job each runner runs; empty where it did and no runner needs more.
 	RunnerNeeds map[string]int64 `json:"-"`
 }
 
@@ -502,6 +503,9 @@ type tick struct {
 	// history and historySizing are Snapshot.JobHistory and HistorySizing.
 	history       map[store.JobUsageKey][]store.JobPeak
 	historySizing string
+	// raised counts, by pool ID, the runners this pass has created above their
+	// typed size for the jobs waiting (scheduler.history_raise).
+	raised map[string]int
 }
 
 // assign maps every queued job onto the pool that will run it, and collects the
@@ -1035,12 +1039,17 @@ func (t *tick) grant(p *store.Pool, plan *PoolPlan, runners []*store.Runner, que
 	// every job on the pool for a host to free up, which is the deadlock that
 	// placing for the heaviest job alone produced on 1 Nov.
 	var placed []placement
-	raiseMB, unraised := t.raiseNeed(p, queued), ""
+	raiseMB, unraised := t.raiseNeed(p, runners, queued), ""
 	if raiseMB > 0 {
 		t.hosts.raise = raiseMB
 		placed = t.hosts.placeAvoiding(p, 1, avoid)
 		t.hosts.raise = 0
-		if len(placed) == 0 {
+		if len(placed) > 0 {
+			if t.raised == nil {
+				t.raised = map[string]int{}
+			}
+			t.raised[p.ID]++
+		} else {
 			unraised = fmt.Sprintf("not raised for job history: the jobs waiting need ~%s, above the pool's %s, and no host has room for that now",
 				formatMB(raiseMB), formatMB(p.Resources.MemoryMB))
 		}

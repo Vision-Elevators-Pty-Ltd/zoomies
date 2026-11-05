@@ -132,9 +132,12 @@ type MemoryPoolInput struct {
 	Workloads   []MemoryWorkload
 	// HistoryGrantMB is what the runners given a rule for their job's history
 	// (scheduler.history_raise, HistoryGrantFor) may be lent between them
-	// beyond their guarantees: memory the overcommitted ledger has already
-	// booked them, so it is added to what the promises leave. What the host
-	// measured as free still bounds the whole.
+	// beyond their guarantees, added to what the promises leave. Where memory
+	// is overcommitted and booked by history, the ledger has booked it already;
+	// elsewhere (memory booked once per host) nothing has, and a placement can
+	// take the memory a grant was about to use. Either way what the host
+	// measured as free bounds the whole, and the agent re-reads it before every
+	// raise, so a grant can be refused but never take what is not there.
 	HistoryGrantMB int64
 }
 
@@ -198,10 +201,10 @@ func PlanMemoryPool(in MemoryPoolInput) MemoryPool {
 
 	ledger := max(in.TotalMB-max(in.FloorMB, 0)-out.CommittedMB-out.IdleReserveMB-out.StartReserveMB, 0)
 	if grant := max(in.HistoryGrantMB, 0); grant > 0 {
-		// A grant is a runner that is expected to outgrow its guarantee, booked
-		// for it by the overcommitted ledger, which is why it is not found in
-		// what the guarantees leave. It is never more than the machine above
-		// its floor, and the measurement below bounds it by what is free.
+		// A grant is a runner that is expected to outgrow its guarantee, which
+		// is why it is not found in what the guarantees leave. It is never more
+		// than the machine above its floor, and the measurement below bounds it
+		// by what is free.
 		out.HistoryGrantMB = grant
 		ledger = min(ledger+grant, max(in.TotalMB-max(in.FloorMB, 0), 0))
 	}

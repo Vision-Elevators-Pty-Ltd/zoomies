@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"fmt"
+	"math"
+	"slices"
 
 	"github.com/eyupio/zoomies/internal/store"
 )
@@ -24,10 +26,16 @@ import (
 //
 // Both are bounded the same way: never more than HistoryRaiseMaxFactor times
 // the typed size, and never past what the host can hold (HistoryRaiseCap). The
-// figure is historyBooking's, the one the overcommitted ledger books by: the
-// ninetieth percentile of the job's recent peaks plus the booking headroom,
+// figure is raiseNeedMB: the booking headroom on top of the larger of the
+// ninetieth percentile of the job's peaks and the limit a run was killed at,
 // from at least BookingMinSamples runs, so a job with a short history is never
 // raised.
+//
+// What is still not covered: a shared pair can only be raised when it is
+// created, and GitHub, not Zoomies, picks which runner takes a job. A heavy job
+// handed a runner created at the typed size (before it was queued, or for the
+// light jobs beside it) is still killed at the typed size. This makes such a
+// kill rarer; it does not make it impossible.
 
 // The modes of scheduler.history_raise.
 const (
@@ -40,6 +48,46 @@ const (
 
 // HistoryRaiseModes is every value scheduler.history_raise takes.
 var HistoryRaiseModes = []string{HistoryRaiseOn, HistoryRaiseOff}
+
+// raiseNeedMB is what the history of a job says a runner raised for it should
+// hold: the booking headroom on top of the larger of the ninetieth percentile
+// of the runs that finished and the largest limit a run was killed at, in
+// profileMemoryStep steps. ok is false with fewer than BookingMinSamples runs.
+//
+// It is not historyBooking, which counts a killed run at half as much again as
+// its limit and then adds the headroom on top: right for a ledger figure that
+// never passes a runner's size, but as a size it turns two kills at 24 GB into
+// 45 GB, nearly twice what the job was killed at. A kill says the limit was too
+// little, and the headroom is how much more is given for that; the ledger keeps
+// its own figure, untouched.
+func raiseNeedMB(peaks []store.JobPeak, headroomPercent int) (int64, bool) {
+	var finished []int64
+	var killed int64
+	runs := 0
+	for _, p := range peaks {
+		if p.OOMKilled {
+			if limit := max(p.MemoryMB, p.GrantedMemoryMB); limit > 0 {
+				killed = max(killed, limit)
+				runs++
+			}
+			continue
+		}
+		if p.MemoryMB > 0 {
+			finished = append(finished, p.MemoryMB)
+			runs++
+		}
+	}
+	if runs < BookingMinSamples {
+		return 0, false
+	}
+	need := killed
+	if len(finished) > 0 {
+		slices.Sort(finished)
+		need = max(need, finished[percentileIndex(len(finished))])
+	}
+	scaled := math.Ceil(float64(need) * float64(100+max(headroomPercent, 0)) / 100)
+	return int64(math.Ceil(scaled/profileMemoryStep)) * profileMemoryStep, true
+}
 
 // HistoryRaiseMaxFactor is the most a runner may be raised to for its job's
 // history, as a multiple of its pool's typed memory. A job whose history says
@@ -111,7 +159,7 @@ func HistoryRaiseCap(p *store.Pool, h *store.Host) int64 {
 // HistoryGrant is the memory-valve rule a runner is given because the job it is
 // running is known to need more than it was created with.
 type HistoryGrant struct {
-	// NeedMB is what the job's history says it needs (historyBooking).
+	// NeedMB is what the job's history says it needs (raiseNeedMB).
 	NeedMB int64 `json:"need_mb"`
 	// TargetMB is what the runner's own container may grow to: the need,
 	// bounded by HistoryRaiseCap.
@@ -157,7 +205,9 @@ func HistoryGrantFor(p *store.Pool, h *store.Host, r *store.Runner, needMB int64
 	}
 	ceiling := guarantee + target - r.AllocatedMemoryMB
 	if h != nil && h.MemoryMB > 0 {
-		ceiling = min(ceiling, h.MemoryMB)
+		// The containers together never past the machine above the floor the
+		// valve keeps free, which the agent would refuse anyway.
+		ceiling = min(ceiling, h.MemoryMB-MemoryPoolFloor(h))
 	}
 	if ceiling <= guarantee {
 		return HistoryGrant{}, false
@@ -169,12 +219,14 @@ func HistoryGrantFor(p *store.Pool, h *store.Host, r *store.Runner, needMB int64
 // job has a history to book from, what that history says the job needs, by
 // runner ID: the figure HistoryGrantFor is given. Only runners whose need is
 // above what they were created with are kept, because those are the only ones
-// anything is done for. Nil with history_raise off.
+// anything is done for. Nil, as distinct from empty, with history_raise off or
+// where the caller could not read which job each runner runs (no Booking):
+// the controller then keeps the needs it had.
 func runnerNeeds(s Snapshot) map[string]int64 {
-	if !s.Policy.historyRaise() || s.Booking == nil || len(s.Booking.RunnerJobs) == 0 {
+	if !s.Policy.historyRaise() || s.Booking == nil {
 		return nil
 	}
-	var out map[string]int64
+	out := map[string]int64{}
 	for _, p := range s.Pools {
 		if !raisesTyped(p) {
 			continue
@@ -188,12 +240,9 @@ func runnerNeeds(s Snapshot) map[string]int64 {
 				continue
 			}
 			key.PoolID = p.ID
-			need, known := historyBooking(s.JobHistory[key], s.Policy.MemoryBookingHeadroomPercent)
+			need, known := raiseNeedMB(s.JobHistory[key], s.Policy.MemoryBookingHeadroomPercent)
 			if !known || need <= r.AllocatedMemoryMB {
 				continue
-			}
-			if out == nil {
-				out = map[string]int64{}
 			}
 			out[r.ID] = need
 		}
@@ -201,29 +250,67 @@ func runnerNeeds(s Snapshot) map[string]int64 {
 	return out
 }
 
-// raiseNeed is the most any job waiting on p is known to need, from the history
-// of its runs on p (historyBooking), where that is above p's typed memory: what
-// a runner created for p's queue now is raised to, where a host has room. Zero
-// where nothing waiting needs more, where too little is known, or where the
-// pool is not one history_raise is for.
+// raiseNeed is what the next runner created for p's queue is raised to, where
+// a host has room, and zero where it is created at its typed size.
 //
-// It is the largest, for the reason poolNeed's is: GitHub, not Zoomies,
-// decides which waiting job an idle runner takes.
-func (t *tick) raiseNeed(p *store.Pool, queued []*store.Job) int64 {
-	if !t.policy.historyRaise() || !raisesTyped(p) {
+// The figure is the most any job waiting on p is known to need (raiseNeedMB)
+// where that is above p's typed memory: GitHub, not Zoomies, decides which
+// waiting job an idle runner takes, so a raised runner is raised for the
+// heaviest. But only as many runners are raised as there are such jobs
+// waiting, less the raised runners of p that have no job yet (still starting,
+// or idle) and those this pass has already raised: one heavy job among five
+// light ones is one raised runner, not six, and a raised runner still waiting
+// for its job is not raised again on the next pass.
+//
+// Zero, too, where nothing waiting needs more, where too little is known,
+// where the pool is not one history_raise is for, or where no host could
+// create it raised (raiseAtCreate): such a pool is raised by the valve once a
+// runner's job is known.
+func (t *tick) raiseNeed(p *store.Pool, runners []*store.Runner, queued []*store.Job) int64 {
+	if !t.policy.historyRaise() || !raisesTyped(p) || !t.hosts.anyRaisesAtCreate(p) {
 		return 0
 	}
 	var need int64
+	heavy := 0
 	for _, j := range queued {
 		if j == nil {
 			continue
 		}
 		key := store.JobUsageKey{Repo: j.Repo, Workflow: j.Workflow, JobName: j.JobName, PoolID: p.ID}
-		if mb, known := historyBooking(t.history[key], t.policy.MemoryBookingHeadroomPercent); known && mb > p.Resources.MemoryMB {
+		if mb, known := raiseNeedMB(t.history[key], t.policy.MemoryBookingHeadroomPercent); known && mb > p.Resources.MemoryMB {
 			need = max(need, mb)
+			heavy++
 		}
 	}
+	if heavy == 0 {
+		return 0
+	}
+	waiting := t.raised[p.ID]
+	for _, r := range runners {
+		if r == nil || !r.State.Live() || t.stillRunning[r.ID] ||
+			r.AllocationSource != store.AllocationHistory || r.AllocatedMemoryMB <= p.Resources.MemoryMB {
+			continue
+		}
+		switch r.State {
+		case store.RunnerProvisioning, store.RunnerRegistering, store.RunnerIdle:
+			waiting++
+		}
+	}
+	if waiting >= heavy {
+		return 0
+	}
 	return need
+}
+
+// anyRaisesAtCreate reports whether any host here could create a runner of p
+// above its typed size (raiseAtCreate), room or not.
+func (hs *hostSet) anyRaisesAtCreate(p *store.Pool) bool {
+	for _, h := range hs.hosts {
+		if HostCouldRun(h, p) && raiseAtCreate(p, h) {
+			return true
+		}
+	}
+	return false
 }
 
 // raiseTo is the memory a runner of p placed on h now is created with while

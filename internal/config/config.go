@@ -810,12 +810,13 @@ type Scheduler struct {
 	HistorySizing string `yaml:"history_sizing"`
 	// HistoryRaise is on or off: whether a runner of a pool with a typed
 	// memory size may hold more than that size when its job's history says
-	// the job needs more (the same ninetieth percentile and headroom as
-	// MemoryBooking), up to twice the typed size and never past what its host
-	// can hold. A runner is created at the larger size where the jobs waiting
-	// on its pool need it and a host has room, and one whose job turns out
-	// heavier than it is given a memory-valve rule to grow into it. Off is
-	// the typed size, always.
+	// the job needs more (MemoryBookingHeadroomPercent on top of the larger of
+	// the ninetieth percentile of its peaks and the limit a run was killed
+	// at), up to twice the typed size and never past what its host can hold.
+	// One runner per such job waiting on its pool is created at the larger
+	// size where a host has room, and one whose job turns out heavier than it
+	// is given a memory-valve rule to grow into it. Off is the typed size,
+	// always.
 	HistoryRaise string `yaml:"history_raise"`
 	// SizeRouting is off, shadow or on: whether jobs are classed small, medium
 	// or large from what their runs used, and sent to a pool for that class.

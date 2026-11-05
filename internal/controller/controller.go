@@ -1524,7 +1524,14 @@ func (c *Controller) setLastPlan(p scheduler.Plan) {
 	c.lastPlan = &p
 	c.lastPlanAt = c.Now()
 	c.bookings = p.Bookings
-	c.runnerNeeds = p.RunnerNeeds
+	// A plan that could not read the jobs' history, or which job each runner
+	// runs, names no needs at all (nil, where a plan that read them and found
+	// none names an empty map). The last pass's grants stand then: dropping
+	// them would take a climbing job's valve rule away for no reason of its
+	// own, and a grant is only ever given to a runner that is still live.
+	if p.RunnerNeeds != nil || c.cfg().Scheduler.HistoryRaise != scheduler.HistoryRaiseOn {
+		c.runnerNeeds = p.RunnerNeeds
+	}
 }
 
 // runnerNeed is what the last pass found the job a runner is running needs,

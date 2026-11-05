@@ -144,3 +144,54 @@ func TestThePassReadsRunningJobsForHistoryRaiseWithoutOvercommit(t *testing.T) {
 		t.Fatalf("with history_raise off and memory booked once the pass read %+v", s.Booking)
 	}
 }
+
+// A pool that only observes does not turn a grant into an observation: the
+// runner whose job outgrows it gets an automatic rule up to the grant, not the
+// pool's larger observing ceiling, which nobody asked to lend up to.
+func TestAGrantOnAnObservingPoolIsCarriedOut(t *testing.T) {
+	h := newHarness(t)
+	_, pool, host := h.fleet()
+	h.valvePool(pool, store.MemoryBurstObserve, 0)
+	heavy := h.valveRunner(pool, host, store.RunnerBusy)
+	watched := h.valveRunner(pool, host, store.RunnerBusy)
+	// The pool's own ceiling is 6144; the grant's 5120 is below it.
+	h.c.setLastPlan(scheduler.Plan{RunnerNeeds: map[string]int64{heavy.ID: 5120}})
+
+	got := memoryBeat(h, host)
+	if rule, _ := ruleFor(got, heavy.ID); rule.Mode != store.MemoryBurstAutomatic || rule.CeilingMB != 5120 {
+		t.Fatalf("heavy rule = %+v, want automatic up to the grant's 5120", rule)
+	}
+	if rule, _ := ruleFor(got, watched.ID); rule.Mode != store.MemoryBurstObserve || rule.CeilingMB != 6144 {
+		t.Fatalf("watched rule = %+v, want the pool's observing rule", rule)
+	}
+	if s := h.c.memoryState(host.ID); s.History != 1 || s.Enforcing != 1 || s.Observing != 1 || s.Pool.HistoryGrantMB != 1024 {
+		t.Fatalf("state = %+v, want one grant of 1024 MB from its guarantee", s)
+	}
+}
+
+// A pass that could not read which job each runner runs, or the jobs' history,
+// keeps the grants the last pass worked out; a pass that read them and found
+// none replaces them.
+func TestAPassThatCouldNotReadHistoryKeepsTheLastGrants(t *testing.T) {
+	h := newHarness(t)
+	_, pool, host := h.fleet()
+	h.valvePool(pool, store.MemoryBurstOff, 0)
+	heavy := h.valveRunner(pool, host, store.RunnerBusy)
+	h.c.setLastPlan(scheduler.Plan{RunnerNeeds: map[string]int64{heavy.ID: 6144}})
+	h.c.setLastPlan(scheduler.Plan{})
+	if _, ok := ruleFor(memoryBeat(h, host), heavy.ID); !ok {
+		t.Fatal("a plan that knew nothing of the running jobs dropped the grant")
+	}
+	h.c.setLastPlan(scheduler.Plan{RunnerNeeds: map[string]int64{}})
+	if got := memoryBeat(h, host); got != nil {
+		t.Fatalf("a plan that found no runner needing more kept %+v", got)
+	}
+}
+
+// The scheduler names the agent's lending feature without importing the agent,
+// and books a raised runner only on a host that advertises it.
+func TestTheSchedulersElasticMemoryFeatureIsTheAgents(t *testing.T) {
+	if scheduler.ElasticMemoryFeature != agent.FeatureElasticMemory {
+		t.Fatalf("scheduler.ElasticMemoryFeature = %q, agent.FeatureElasticMemory = %q", scheduler.ElasticMemoryFeature, agent.FeatureElasticMemory)
+	}
+}

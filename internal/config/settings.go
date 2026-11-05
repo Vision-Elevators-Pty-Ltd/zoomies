@@ -641,7 +641,7 @@ var registry = buildRegistry([]Setting{
 	{
 		Key: "scheduler.history_raise", Label: "Raise typed sizes for job history", Env: "ZOOMIES_HISTORY_RAISE", Kind: KindEnum, Scope: ScopeInstance, Live: true,
 		Choices: []string{"on", "off"},
-		Summary: "Let a runner of a pool with a typed memory size hold more than that size when its job's recent runs say it needs more (the ninetieth percentile of the job's peaks plus the booking headroom, from five runs), up to twice the typed size and never past what its host can hold. A runner is created at the larger size where a job that needs it is waiting and a host has room, and a runner whose job turns out heavier than it is lent the difference by the memory valve. Off keeps every runner at its pool's typed size.",
+		Summary: "Let a runner of a pool with a typed memory size hold more than that size when its job's recent runs say it needs more (the booking headroom on top of the larger of the ninetieth percentile of the job's peaks and the limit a run was killed at, from five runs), up to twice the typed size and never past what its host can hold. One runner per such job waiting is created at the larger size where a host has room, and a runner whose job turns out heavier than it is lent the difference by the memory valve; a pair held to one shared limit can only be raised when it is created. Off keeps every runner at its pool's typed size.",
 	},
 	{
 		Key: "scheduler.size_routing", Label: "Route jobs by size class", Env: "ZOOMIES_SIZE_ROUTING", Kind: KindEnum, Scope: ScopeInstance, Live: true,

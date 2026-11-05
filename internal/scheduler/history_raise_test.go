@@ -40,7 +40,7 @@ func pairPool() *store.Pool {
 // measured free.
 func trustedAgent(id string, freeMB int64) *store.Host {
 	h := nlAgent(id, "", freeMB)
-	h.Features = store.StringSlice{store.FeatureDinDSharedLimit}
+	h.Features = store.StringSlice{store.FeatureDinDSharedLimit, ElasticMemoryFeature}
 	return h
 }
 
@@ -78,7 +78,9 @@ func TestAHistoryGrantIsTheJobsNeedAboveWhatTheRunnerWasGiven(t *testing.T) {
 		wantCeiling int64
 	}{
 		{"a runner with no daemon grows to the need", nodockerPool(), typecheckNeed, true, typecheckNeed},
-		{"a pair of whole limits is lent the difference over both", pairPool(), typecheckNeed, true, 48*gb + typecheckNeed - 24*gb},
+		// 48 GB and the 5.4 GB difference is past the 62 GB machine above its
+		// floor, so the pair is held to that.
+		{"a pair of whole limits is lent the difference over both, to the machine above its floor", pairPool(), typecheckNeed, true, min(48*gb+typecheckNeed-24*gb, h.MemoryMB-MemoryPoolFloor(h))},
 		{"a pair held to one limit is not lent what its slice would refuse", trustedPool(), typecheckNeed, false, 0},
 		{"a job that fits is given nothing", nodockerPool(), 20 * gb, false, 0},
 		{"no need is no grant", nodockerPool(), 0, false, 0},
@@ -267,8 +269,14 @@ func TestThePlanNamesTheNeedOfARunnerWhoseJobOutgrowsIt(t *testing.T) {
 		t.Fatalf("needs = %v, want only the typecheck runner at %d", got, typecheckNeed)
 	}
 	s.JobHistory[key("typecheck", p)] = peaksOf(4, 30*gb)
+	if got := Decide(s).RunnerNeeds; got == nil || len(got) != 0 {
+		t.Fatalf("a job with four runs named needs %v, want none (and not unknown)", got)
+	}
+	// A pass that could not say which job each runner runs names no needs at
+	// all, so the controller keeps the ones it had.
+	s.Booking = nil
 	if got := Decide(s).RunnerNeeds; got != nil {
-		t.Fatalf("a job with four runs named needs %v", got)
+		t.Fatalf("without the running jobs the plan named %v, want nil", got)
 	}
 }
 
@@ -342,5 +350,150 @@ func TestARaiseUnderTheLivePolicyIsBookedAtItsRaisedSize(t *testing.T) {
 	}
 	if !strings.Contains(a[0].Reason, "booked its 29.4 GB; 29.4 GB of 163.3 GB booked on ci-nl-01-trusted") {
 		t.Fatalf("the reason %q does not say the raised runner was booked at its raised size", a[0].Reason)
+	}
+}
+
+// killedRuns is typecheck's day with kills in it: eighteen runs that finished
+// at the same p90 of 23.5 GB, and two killed at the 24 GB limit.
+func killedRuns() []store.JobPeak {
+	out := typecheckRuns()[:18]
+	for range 2 {
+		out = append(out, store.JobPeak{MemoryMB: 24575, OOMKilled: true, GrantedMemoryMB: 24 * gb})
+	}
+	return out
+}
+
+// A kill says the limit was too little, and the headroom is how much more a
+// raise gives for it: 24 GB killed is raised to 30 GB, not to the 45 GB the
+// ledger's figure (half as much again, then the headroom) would make it. The
+// ledger's own figure is unchanged.
+func TestARaiseAfterAKillIsTheKilledLimitAndTheHeadroom(t *testing.T) {
+	if got, ok := raiseNeedMB(killedRuns(), 25); !ok || got != 30*gb {
+		t.Fatalf("after two kills at 24 GB the raise is %d MB (known %v), want 24 GB x 1.25 = 30 GB", got, ok)
+	}
+	if got, _ := historyBooking(killedRuns(), 25); got != 46080 {
+		t.Fatalf("the ledger's figure moved to %d MB; it is 24 GB x 1.5 x 1.25 = 46080 and this change leaves it alone", got)
+	}
+	// Without kills the raise is the p90 and the headroom, as the booking is.
+	if got, _ := raiseNeedMB(typecheckRuns(), 25); got != typecheckNeed {
+		t.Fatalf("without kills the raise is %d MB, want %d", got, typecheckNeed)
+	}
+	// A p90 above the killed limit wins, and a killed run is one of the five.
+	heavier := append(peaksOf(18, 28*gb), store.JobPeak{MemoryMB: 24575, OOMKilled: true, GrantedMemoryMB: 24 * gb})
+	if got, _ := raiseNeedMB(heavier, 25); got != 35*gb {
+		t.Fatalf("with a p90 of 28 GB the raise is %d MB, want 28 GB x 1.25 = 35 GB", got)
+	}
+	short := append(peaksOf(3, 20*gb), store.JobPeak{OOMKilled: true, GrantedMemoryMB: 24 * gb})
+	if _, ok := raiseNeedMB(short, 25); ok {
+		t.Fatal("four runs, one of them killed, gave a raise; fewer than five say nothing")
+	}
+	// The create, the grant and the raised booking all use it.
+	p := nodockerPool()
+	h := trustedAgent("ci-nl-01-trusted", 49*gb)
+	s := historyRaiseFleet(p, h, HistoryRaiseOn)
+	s.JobHistory[key("typecheck", p)] = killedRuns()
+	if a := actionsOf(only(t, Decide(s)).Actions, ActionCreate); len(a) != 1 || a[0].Size == nil || a[0].Size.MemoryMB != 30*gb {
+		t.Fatalf("after two kills the runner was created at %+v, want 30 GB", a)
+	}
+	r := typecheckOn("run_tc", p, h)
+	history := map[store.JobUsageKey][]store.JobPeak{key("typecheck", p): killedRuns()}
+	b := newBooker(BookingHistory, 25, &BookingInputs{RunnerJobs: map[string]store.JobUsageKey{r.ID: key("typecheck", p)}}, history, []*store.Pool{p}, nil)
+	b.raise = true
+	if got, _, basis := b.runner(p, h, r); got != 30*gb || basis != basisRaised {
+		t.Fatalf("after two kills the raised runner books %d MB (%s), want 30 GB", got, basis)
+	}
+}
+
+// heavyAndLight is the merge group: typecheck and five light jobs waiting on
+// the pool, on two agents with room for every one of them raised.
+func heavyAndLight(p *store.Pool) Snapshot {
+	a, b := trustedAgent("a1", 55*gb), trustedAgent("a2", 55*gb)
+	s := historyRaiseFleet(p, a, HistoryRaiseOn)
+	s.Hosts = []*store.Host{a, b}
+	for _, name := range []string{"lint", "unit (1/2)", "unit (2/2)", "build", "docs"} {
+		j := queued(name, 0, p.Labels...)
+		j.Repo, j.Workflow = "Vision-Elevators-Pty-Ltd/ops_app", "PR"
+		s.Jobs = append(s.Jobs, j)
+		s.JobHistory[key(name, p)] = peaksOf(20, 3*gb, 5*gb)
+	}
+	s.Policy.MemoryOvercommitPercent, s.Policy.StartChargePercent, s.Policy.CPUOvercommitPercent = 300, 30, 400
+	s.Policy.MemoryBooking = BookingHistory
+	s.Booking = &BookingInputs{PoolRuns: map[string][]store.JobPeak{p.ID: peaksOf(100, 4*gb, 9*gb)}}
+	return s
+}
+
+func raisedCreates(as []Action) (raised, typed int) {
+	for _, a := range actionsOf(as, ActionCreate) {
+		if a.SizedFromHistory {
+			raised++
+		} else {
+			typed++
+		}
+	}
+	return raised, typed
+}
+
+// One heavy job among five light ones raises one runner, not six: GitHub may
+// hand the heavy job any of them, but six raised runners for one job halve the
+// pool's start rate for as long as it waits.
+func TestOneHeavyJobAmongLightOnesRaisesOneRunner(t *testing.T) {
+	p := trustedPool()
+	raised, typed := raisedCreates(only(t, Decide(heavyAndLight(p))).Actions)
+	if raised != 1 || typed != 5 {
+		t.Fatalf("1 heavy and 5 light jobs created %d raised and %d typed runners, want 1 and 5", raised, typed)
+	}
+	// Two heavy jobs, two raised runners.
+	s := heavyAndLight(p)
+	j := queued("typecheck-2", 0, p.Labels...)
+	j.Repo, j.Workflow, j.JobName = "Vision-Elevators-Pty-Ltd/ops_app", "PR", "typecheck"
+	s.Jobs = append(s.Jobs, j)
+	if raised, _ := raisedCreates(only(t, Decide(s)).Actions); raised != 2 {
+		t.Fatalf("2 heavy jobs created %d raised runners, want 2", raised)
+	}
+}
+
+// A raised runner still waiting for its job counts against the heavy jobs, so
+// the next pass does not raise another for the same one. Once it is running a
+// job it no longer does.
+func TestARaisedRunnerWithoutAJobIsNotRaisedAgainOnTheNextPass(t *testing.T) {
+	p := trustedPool()
+	s := heavyAndLight(p)
+	waiting := testRunner("run_raised", p, store.RunnerRegistering, 0)
+	waiting.HostID, waiting.AllocatedMemoryMB, waiting.AllocationSource = "a1", typecheckNeed, store.AllocationHistory
+	s.Runners = map[string][]*store.Runner{p.ID: {waiting}}
+	if raised, _ := raisedCreates(only(t, Decide(s)).Actions); raised != 0 {
+		t.Fatalf("with a raised runner registering the pass raised %d more", raised)
+	}
+	waiting.State = store.RunnerBusy
+	s.RunnersWithAJob = map[string]bool{waiting.ID: true}
+	if raised, _ := raisedCreates(only(t, Decide(s)).Actions); raised != 1 {
+		t.Fatalf("with the raised runner busy on another job the pass raised %d, want 1", raised)
+	}
+}
+
+// A pool no host can create raised (a pair of whole limits) is not tried, and
+// its reason does not claim a host was short of room.
+func TestAPoolThatIsNeverRaisedAtCreationSaysNothingAboutRoom(t *testing.T) {
+	p := pairPool()
+	big := trustedAgent("big", 180*gb)
+	big.MemoryMB = 200 * gb
+	a := actionsOf(only(t, Decide(historyRaiseFleet(p, big, HistoryRaiseOn))).Actions, ActionCreate)
+	if len(a) != 1 || a[0].Size != nil || strings.Contains(a[0].Reason, "no host has room") {
+		t.Fatalf("creates = %+v, want one at the typed size with no claim about room", a)
+	}
+}
+
+// A shared-limit pool on a host whose agent cannot hold a pair to one limit is
+// a pair of whole limits there: it is not created raised, and its runner is
+// lent for its job by the valve instead.
+func TestASharedPoolOnAHostWithoutSharedLimitsIsRaisedByTheValve(t *testing.T) {
+	p := trustedPool()
+	h := nlAgent("old", "", 49*gb)
+	h.Features = store.StringSlice{ElasticMemoryFeature}
+	if a := actionsOf(only(t, Decide(historyRaiseFleet(p, h, HistoryRaiseOn))).Actions, ActionCreate); len(a) != 1 || a[0].Size != nil {
+		t.Fatalf("creates = %+v, want the typed size", a)
+	}
+	if _, ok := HistoryGrantFor(p, h, typecheckOn("run_tc", p, h), typecheckNeed); !ok {
+		t.Fatal("no valve grant for a pair the host does not hold to one limit")
 	}
 }

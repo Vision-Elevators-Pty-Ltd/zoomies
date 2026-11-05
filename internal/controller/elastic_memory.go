@@ -244,20 +244,29 @@ func (c *Controller) elasticMemoryDirective(ctx context.Context, h *store.Host, 
 			}
 		}
 		// A runner whose job is known to need more than it was created with is
-		// lent up to that need, whatever its pool's own setting, and a rule the
-		// pool already gives it keeps the larger ceiling. Always carried out: a
-		// grant observed would be a runner left to be killed at the limit its
-		// job is known to outgrow.
-		if g, ok := c.historyGrant(p, h, r); ok && (rule == nil || g.CeilingMB > rule.CeilingMB) {
-			if rule == nil {
+		// lent up to that need, whatever its pool's own setting. Always carried
+		// out: a grant observed would be a runner left to be killed at the limit
+		// its job is known to outgrow. A pool that lends already keeps the
+		// larger ceiling of the two. A pool that only observes gives the runner
+		// an automatic rule at the grant's ceiling and no higher: its own
+		// ceiling is a figure the operator asked to watch, not to lend up to,
+		// and the grant is the part the job's history accounts for.
+		if g, ok := c.historyGrant(p, h, r); ok {
+			switch {
+			case rule == nil || rule.Mode != store.MemoryBurstAutomatic:
 				historyMB += g.CeilingMB - guarantee
-				rule = &agent.ElasticMemoryRunner{RunnerID: r.ID, GuaranteeMB: guarantee}
-			} else {
+				if rule == nil {
+					rule = &agent.ElasticMemoryRunner{RunnerID: r.ID, GuaranteeMB: guarantee}
+				}
+				rule.Mode, rule.CeilingMB = store.MemoryBurstAutomatic, g.CeilingMB
+				granted[r.ID] = true
+				out.History++
+			case g.CeilingMB > rule.CeilingMB:
 				historyMB += g.CeilingMB - rule.CeilingMB
+				rule.CeilingMB = g.CeilingMB
+				granted[r.ID] = true
+				out.History++
 			}
-			rule.Mode, rule.CeilingMB = store.MemoryBurstAutomatic, g.CeilingMB
-			granted[r.ID] = true
-			out.History++
 		}
 		if rule == nil {
 			continue

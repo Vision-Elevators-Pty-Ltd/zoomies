@@ -219,7 +219,7 @@ func (c *Controller) snapshot(ctx context.Context) (scheduler.Snapshot, error) {
 		if jobs, err := c.st.RunningJobKeys(ctx); err == nil {
 			booking = &scheduler.BookingInputs{RunnerJobs: jobs}
 		} else {
-			c.log.Warn("could not read which job each runner is running; raising no runner for its job's history this pass", "error", err)
+			c.log.Warn("could not read which job each runner is running; keeping the last pass's history grants", "error", err)
 		}
 	}
 	var history map[store.JobUsageKey][]store.JobPeak
@@ -246,6 +246,9 @@ func (c *Controller) snapshot(ctx context.Context) (scheduler.Snapshot, error) {
 			c.log.Warn("could not read job history; placing without it this pass", "error", err)
 			// Without the jobs' history a runner would be booked at its
 			// pool's figure whatever it is running; book every one whole.
+			// The plan then names no runner needs at all (nil, not none), and
+			// the grants the last pass worked out stand until a pass can read
+			// the history again (setLastPlan).
 			booking = nil
 		}
 	}

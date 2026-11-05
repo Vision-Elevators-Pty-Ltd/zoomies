@@ -7,6 +7,11 @@ import (
 	"github.com/eyupio/zoomies/internal/store"
 )
 
+// ElasticMemoryFeature is agent.FeatureElasticMemory, the word an agent's host
+// row carries when it can lend memory. It is written out because this package
+// imports no agent code; a test holds the two equal.
+const ElasticMemoryFeature = "elastic-memory"
+
 // The modes of scheduler.memory_booking.
 const (
 	// BookingHistory books a runner in the overcommitted memory ledger at what
@@ -185,10 +190,12 @@ func (b *booker) runner(p *store.Pool, h *store.Host, r *store.Runner) (booked, 
 	if b == nil || charge <= 0 || r == nil {
 		return charge, charge, basisTyped
 	}
-	if b.raise {
+	if b.raise && h != nil && h.Supports(ElasticMemoryFeature) {
+		// Only where the agent can lend: elsewhere the grant is never carried
+		// out, and booking it would hold memory for a raise that cannot come.
 		if key, ok := b.runnerJobs[r.ID]; ok {
 			key.PoolID = p.ID
-			if need, known := b.job(key); known {
+			if need, known := raiseNeedMB(b.jobs[key], b.headroom); known {
 				if g, ok := HistoryGrantFor(p, h, r, need); ok && g.CeilingMB > charge {
 					return g.CeilingMB, charge, basisRaised
 				}

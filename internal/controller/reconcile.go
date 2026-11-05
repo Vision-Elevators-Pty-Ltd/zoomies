@@ -210,8 +210,20 @@ func (c *Controller) snapshot(ctx context.Context) (scheduler.Snapshot, error) {
 	}
 	mode := c.cfg().Scheduler.HistorySizing
 	booking := c.bookingInputs(ctx, pools)
+	raise := c.cfg().Scheduler.HistoryRaise == scheduler.HistoryRaiseOn
+	if raise && booking == nil {
+		// scheduler.history_raise needs the job each runner is running even
+		// where nothing is booked by history: a runner whose job is heavier
+		// than it is given a valve rule to grow into it. Without the read the
+		// pass raises nothing for running jobs and places as before.
+		if jobs, err := c.st.RunningJobKeys(ctx); err == nil {
+			booking = &scheduler.BookingInputs{RunnerJobs: jobs}
+		} else {
+			c.log.Warn("could not read which job each runner is running; raising no runner for its job's history this pass", "error", err)
+		}
+	}
 	var history map[store.JobUsageKey][]store.JobPeak
-	if mode == scheduler.HistoryShadow || mode == scheduler.HistoryOn || booking != nil {
+	if mode == scheduler.HistoryShadow || mode == scheduler.HistoryOn || booking != nil || raise {
 		// Read for every distinct queued job, whichever pool ends up running
 		// it: the store answers per pool and the scheduler picks the pool's.
 		// A failed read costs this pass its history and nothing else -- the

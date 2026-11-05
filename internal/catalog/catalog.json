@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_from": "6e938ed2",
+  "generated_from": "1b86087a",
   "entries": [
     {
       "id": "agent.backend_missing",
@@ -3448,6 +3448,20 @@
       "fix": "A pool that sets no `cpus` or `memory_mb` gets runners with no cgroup limit at all, so a host's worth of them can each take every core and all of the memory; the shape that stops Docker answering. Leave it on, or set both on every pool.",
       "verify": null,
       "setting": "scheduler.default_runner_limits",
+      "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
+      "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
+    },
+    {
+      "id": "scheduler.history_raise",
+      "kind": "problem",
+      "title": "scheduler.history_raise",
+      "category": "configuration",
+      "severity": "error",
+      "detection": "static",
+      "detects": "Use `on` or `off`.",
+      "fix": "Use `on` or `off`.",
+      "verify": null,
+      "setting": "scheduler.history_raise",
       "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
       "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
     },

@@ -808,6 +808,15 @@ type Scheduler struct {
 	// to need from their recent runs. Shadow, the default, works it out and
 	// records where it would have differed without changing placement.
 	HistorySizing string `yaml:"history_sizing"`
+	// HistoryRaise is on or off: whether a runner of a pool with a typed
+	// memory size may hold more than that size when its job's history says
+	// the job needs more (the same ninetieth percentile and headroom as
+	// MemoryBooking), up to twice the typed size and never past what its host
+	// can hold. A runner is created at the larger size where the jobs waiting
+	// on its pool need it and a host has room, and one whose job turns out
+	// heavier than it is given a memory-valve rule to grow into it. Off is
+	// the typed size, always.
+	HistoryRaise string `yaml:"history_raise"`
 	// SizeRouting is off, shadow or on: whether jobs are classed small, medium
 	// or large from what their runs used, and sent to a pool for that class.
 	// Shadow works the class out and records it, and where the job ran, without
@@ -1311,6 +1320,9 @@ func Default() *Config {
 			PlacementMode:           "headroom",
 			HostOrder:               "headroom",
 			HistorySizing:           "shadow",
+			// On, because it only ever acts for a job whose own history says the
+			// typed size kills it, and only on a host with room for the rest.
+			HistoryRaise:            "on",
 			HostThrottling:          true,
 			HostAutoAdjust:          true,
 			AutoRerunLimit:          1,

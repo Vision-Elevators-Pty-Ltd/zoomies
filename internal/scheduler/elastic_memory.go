@@ -130,6 +130,12 @@ type MemoryPoolInput struct {
 	// ledger says nobody promised, so the smaller of the two is what there is.
 	AvailableMB *int64
 	Workloads   []MemoryWorkload
+	// HistoryGrantMB is what the runners given a rule for their job's history
+	// (scheduler.history_raise, HistoryGrantFor) may be lent between them
+	// beyond their guarantees: memory the overcommitted ledger has already
+	// booked them, so it is added to what the promises leave. What the host
+	// measured as free still bounds the whole.
+	HistoryGrantMB int64
 }
 
 // MemoryPool is what a host can lend, and how that was worked out, in words the
@@ -145,8 +151,9 @@ type MemoryPool struct {
 	LentMB, PoolMB int64
 	// CommittedMB, IdleReserveMB and StartReserveMB are the lines of the
 	// ledger the capacity was taken from, so a pool of nothing can say whose
-	// guarantees it went to.
-	CommittedMB, IdleReserveMB, StartReserveMB int64
+	// guarantees it went to. HistoryGrantMB is what was added to it for
+	// runners raised for their job's history.
+	CommittedMB, IdleReserveMB, StartReserveMB, HistoryGrantMB int64
 	// Binding says what limited CapacityMB: MemoryBoundLedger when it was the
 	// promises already made, MemoryBoundMeasured when it was the memory the host
 	// measured as free.
@@ -190,6 +197,14 @@ func PlanMemoryPool(in MemoryPoolInput) MemoryPool {
 	}
 
 	ledger := max(in.TotalMB-max(in.FloorMB, 0)-out.CommittedMB-out.IdleReserveMB-out.StartReserveMB, 0)
+	if grant := max(in.HistoryGrantMB, 0); grant > 0 {
+		// A grant is a runner that is expected to outgrow its guarantee, booked
+		// for it by the overcommitted ledger, which is why it is not found in
+		// what the guarantees leave. It is never more than the machine above
+		// its floor, and the measurement below bounds it by what is free.
+		out.HistoryGrantMB = grant
+		ledger = min(ledger+grant, max(in.TotalMB-max(in.FloorMB, 0), 0))
+	}
 	out.CapacityMB, out.Binding = ledger, MemoryBoundLedger
 	if in.AvailableMB != nil {
 		// What is free now, above the floor, is what can still be handed out;

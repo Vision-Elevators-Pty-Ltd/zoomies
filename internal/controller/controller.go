@@ -358,6 +358,12 @@ type Controller struct {
 	// bookings is how the last pass's overcommitted memory ledger saw each
 	// host (scheduler.Plan.Bookings), for the Hosts page.
 	bookings map[string]*scheduler.HostBooking
+	// runnerNeeds is what the last pass found each runner's job needs, where
+	// that is above what the runner was created with
+	// (scheduler.Plan.RunnerNeeds): what each heartbeat's memory-valve rules
+	// grant a runner for its job's history. At most one pass old, and empty
+	// until the first pass after a start.
+	runnerNeeds map[string]int64
 	// lease is this controller's claim on the database, renewed on a timer.
 	// leaseLost is set when a renewal found somebody else holding it, which is
 	// the fleet's worst state: two schedulers, both certain they are the only
@@ -1109,6 +1115,7 @@ func (c *Controller) policy() scheduler.Policy {
 		MemoryBooking:                c.cfg().Scheduler.MemoryBooking,
 		MemoryBookingHeadroomPercent: c.cfg().Scheduler.MemoryBookingHeadroomPercent,
 		MachineLabel:                 c.cfg().Scheduler.MachineLabel,
+		HistoryRaise:                 c.cfg().Scheduler.HistoryRaise,
 		MaxRunnerLifetime:            c.cfg().Scheduler.MaxRunnerLifetime,
 		ProvisionTimeout:             c.cfg().Scheduler.ProvisionTimeout,
 		DrainTimeout:                 c.cfg().Scheduler.DrainTimeout,
@@ -1517,6 +1524,39 @@ func (c *Controller) setLastPlan(p scheduler.Plan) {
 	c.lastPlan = &p
 	c.lastPlanAt = c.Now()
 	c.bookings = p.Bookings
+	c.runnerNeeds = p.RunnerNeeds
+}
+
+// runnerNeed is what the last pass found the job a runner is running needs,
+// where that is above what the runner was created with and
+// scheduler.history_raise is on; zero otherwise.
+func (c *Controller) runnerNeed(id string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.runnerNeeds[id]
+}
+
+// historyNeeds is a copy of runnerNeeds while scheduler.history_raise is on,
+// for the views; nil while it is off, so a runner's view stops saying it was
+// raised the moment the setting is.
+func (c *Controller) historyNeeds() map[string]int64 {
+	if c.cfg().Scheduler.HistoryRaise != scheduler.HistoryRaiseOn {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return maps.Clone(c.runnerNeeds)
+}
+
+// historyGrant is the memory-valve rule a runner r of p on h is given for its
+// job's history (scheduler.HistoryGrantFor), read from the last pass. The
+// setting is read again here, so turning it off stops every grant at the next
+// heartbeat rather than at the next pass.
+func (c *Controller) historyGrant(p *store.Pool, h *store.Host, r *store.Runner) (scheduler.HistoryGrant, bool) {
+	if r == nil || c.cfg().Scheduler.HistoryRaise != scheduler.HistoryRaiseOn {
+		return scheduler.HistoryGrant{}, false
+	}
+	return scheduler.HistoryGrantFor(p, h, r, c.runnerNeed(r.ID))
 }
 
 // bookingOn is how the last pass booked a host's memory, nil where memory is

@@ -639,6 +639,11 @@ var registry = buildRegistry([]Setting{
 		Summary: "Place a runner only on a host with room for what the jobs waiting on its pool used on their recent runs, and size it up to that where the pool leaves its size to the host. Shadow works it out and records where it would have placed differently without changing anything; off ignores job history. GitHub picks which waiting job a runner takes, so the runner is placed for the largest of them.",
 	},
 	{
+		Key: "scheduler.history_raise", Label: "Raise typed sizes for job history", Env: "ZOOMIES_HISTORY_RAISE", Kind: KindEnum, Scope: ScopeInstance, Live: true,
+		Choices: []string{"on", "off"},
+		Summary: "Let a runner of a pool with a typed memory size hold more than that size when its job's recent runs say it needs more (the ninetieth percentile of the job's peaks plus the booking headroom, from five runs), up to twice the typed size and never past what its host can hold. A runner is created at the larger size where a job that needs it is waiting and a host has room, and a runner whose job turns out heavier than it is lent the difference by the memory valve. Off keeps every runner at its pool's typed size.",
+	},
+	{
 		Key: "scheduler.size_routing", Label: "Route jobs by size class", Env: "ZOOMIES_SIZE_ROUTING", Kind: KindEnum, Scope: ScopeInstance, Live: true,
 		Choices: []string{"off", "shadow", "on"},
 		Summary: "Class each job small, medium or large from what its recent runs used, and send it to the pool for that class, so light jobs land on small hosts and heavy ones on large hosts. A workflow that writes zoomies-large in runs-on is always honoured and never moved; a job that writes only zoomies is routed best effort, because GitHub, not Zoomies, decides which waiting job a runner takes. Shadow records each job's class and where it ran, and sends nothing anywhere; off classes nothing. Changing it puts the jobs already waiting through the new mode.",

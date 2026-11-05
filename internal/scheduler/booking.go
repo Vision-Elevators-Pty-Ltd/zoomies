@@ -88,6 +88,10 @@ const (
 	// basisPool is the pool's history, or the jobs waiting on it: the runner
 	// has no job yet.
 	basisPool = "pool"
+	// basisRaised is a runner whose job needs more than its size, which
+	// scheduler.history_raise lets it grow into (HistoryGrantFor): booked at
+	// what it may grow to, above its size.
+	basisRaised = "raised"
 )
 
 // booker books runners by history. A nil booker books every runner at its
@@ -102,6 +106,10 @@ type booker struct {
 	// byJob is each job's booking, worked out once a pass: several runners
 	// run the same job, and every live runner is booked on every pass.
 	byJob map[store.JobUsageKey]jobBooking
+	// raise is scheduler.history_raise on: a runner whose job needs more than
+	// its size, and that the memory valve will let grow into it, is booked at
+	// what it may grow to.
+	raise bool
 }
 
 type jobBooking struct {
@@ -166,9 +174,28 @@ func newBooker(mode string, headroom int, in *BookingInputs, history map[store.J
 // is heavier now. A runner lent memory by the valve is booked whole: it was
 // lent because it was using what it had. A job with too little history books
 // its runner whole.
+//
+// The one exception to "never more than the charge" is a runner whose job is
+// heavier than its size under scheduler.history_raise: the valve will let it
+// grow to its job's need (HistoryGrantFor), so it is booked at that ceiling,
+// lent memory or not, and the machine's one ceiling counts what it is about to
+// take rather than what it was created with.
 func (b *booker) runner(p *store.Pool, h *store.Host, r *store.Runner) (booked, charge int64, basis string) {
 	charge = RunnerCharge(p, h, r).MemoryMB
-	if b == nil || charge <= 0 || r == nil || r.LentMemoryMB > 0 {
+	if b == nil || charge <= 0 || r == nil {
+		return charge, charge, basisTyped
+	}
+	if b.raise {
+		if key, ok := b.runnerJobs[r.ID]; ok {
+			key.PoolID = p.ID
+			if need, known := b.job(key); known {
+				if g, ok := HistoryGrantFor(p, h, r, need); ok && g.CeilingMB > charge {
+					return g.CeilingMB, charge, basisRaised
+				}
+			}
+		}
+	}
+	if r.LentMemoryMB > 0 {
 		return charge, charge, basisTyped
 	}
 	var need int64
@@ -237,6 +264,9 @@ type HostBooking struct {
 	BookedMemoryMB int64 `json:"booked_memory_mb"`
 	TypedMemoryMB  int64 `json:"typed_memory_mb"`
 	ByHistory      int   `json:"by_history,omitempty"`
+	// RaisedByHistory is how many runners are booked above their size, at
+	// what scheduler.history_raise lets them grow to for their job.
+	RaisedByHistory int `json:"raised_by_history,omitempty"`
 	// Machine is the value of scheduler.machine_label the host shares with
 	// other agents, empty for a host that is a machine of its own.
 	// MachineBookedMemoryMB is what every agent on that machine is booked for,
@@ -283,7 +313,11 @@ func bookingTotals(hosts []*store.Host, pools []*store.Pool, runners map[string]
 			t := out[h.ID]
 			t.BookedMemoryMB += booked
 			t.TypedMemoryMB += charge
-			if basis != basisTyped {
+			switch basis {
+			case basisTyped:
+			case basisRaised:
+				t.RaisedByHistory++
+			default:
 				t.ByHistory++
 			}
 		}

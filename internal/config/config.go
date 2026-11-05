@@ -813,9 +813,10 @@ type Scheduler struct {
 	// the job needs more (MemoryBookingHeadroomPercent on top of the larger of
 	// the ninetieth percentile of its peaks and the limit a run was killed
 	// at), up to twice the typed size and never past what its host can hold.
-	// One runner per such job waiting on its pool is created at the larger
-	// size where a host has room, and one whose job turns out heavier than it
-	// is given a memory-valve rule to grow into it. Off is the typed size,
+	// Runners are created at the larger size where a host has room (one per
+	// such job waiting, or every one while such a job waits for a pair held
+	// to one shared limit), and one whose job turns out heavier than it is
+	// given a memory-valve rule to grow into it. Off is the typed size,
 	// always.
 	HistoryRaise string `yaml:"history_raise"`
 	// SizeRouting is off, shadow or on: whether jobs are classed small, medium

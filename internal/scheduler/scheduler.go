@@ -448,6 +448,15 @@ func Decide(s Snapshot) Plan {
 	for _, p := range pools {
 		pp := t.decidePool(p, s.Runners[p.ID], demand[p.ID])
 		plan.Pools = append(plan.Pools, pp)
+		for _, a := range pp.Actions {
+			if a.RunnerID == "" {
+				continue
+			}
+			if t.acted == nil {
+				t.acted = map[string]bool{}
+			}
+			t.acted[a.RunnerID] = true
+		}
 	}
 	if limit := s.Policy.MaxRunners; limit > 0 {
 		// Counted after the reap, from what each pool still holds, so a runner
@@ -504,8 +513,11 @@ type tick struct {
 	history       map[store.JobUsageKey][]store.JobPeak
 	historySizing string
 	// raised counts, by pool ID, the runners this pass has created above their
-	// typed size for the jobs waiting (scheduler.history_raise).
+	// typed size for the jobs waiting (scheduler.history_raise), and acted is
+	// every runner this pass reaps, fails, drains or removes: neither is one a
+	// waiting job can still be handed.
 	raised map[string]int
+	acted  map[string]bool
 }
 
 // assign maps every queued job onto the pool that will run it, and collects the

@@ -255,10 +255,10 @@ func (c *Controller) elasticMemoryDirective(ctx context.Context, h *store.Host, 
 			switch {
 			case rule == nil || rule.Mode != store.MemoryBurstAutomatic:
 				historyMB += g.CeilingMB - guarantee
-				if rule == nil {
-					rule = &agent.ElasticMemoryRunner{RunnerID: r.ID, GuaranteeMB: guarantee}
-				}
-				rule.Mode, rule.CeilingMB = store.MemoryBurstAutomatic, g.CeilingMB
+				// A new rule, not the observing one made real: the observing
+				// pool's swap allowance was never one it asked to be given.
+				rule = &agent.ElasticMemoryRunner{RunnerID: r.ID, GuaranteeMB: guarantee,
+					Mode: store.MemoryBurstAutomatic, CeilingMB: g.CeilingMB}
 				granted[r.ID] = true
 				out.History++
 			case g.CeilingMB > rule.CeilingMB:

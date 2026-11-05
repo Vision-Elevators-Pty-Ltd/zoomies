@@ -3,6 +3,7 @@ package controller
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eyupio/zoomies/internal/agent"
 	"github.com/eyupio/zoomies/internal/config"
@@ -188,10 +189,61 @@ func TestAPassThatCouldNotReadHistoryKeepsTheLastGrants(t *testing.T) {
 	}
 }
 
-// The scheduler names the agent's lending feature without importing the agent,
-// and books a raised runner only on a host that advertises it.
+// The scheduler names the agent's lending feature without importing the agent;
+// that it books a raised runner only on a host advertising it is held by
+// TestARaisedRunnerIsBookedAtItsGrantOnlyWhereTheAgentCanLend.
 func TestTheSchedulersElasticMemoryFeatureIsTheAgents(t *testing.T) {
 	if scheduler.ElasticMemoryFeature != agent.FeatureElasticMemory {
 		t.Fatalf("scheduler.ElasticMemoryFeature = %q, agent.FeatureElasticMemory = %q", scheduler.ElasticMemoryFeature, agent.FeatureElasticMemory)
+	}
+}
+
+// Needs kept over passes that could not read them expire: after keptNeedsFor
+// the grants are dropped rather than carried onto jobs they were never worked
+// out for, and a controller whose passes stop altogether stops granting too.
+func TestKeptNeedsExpire(t *testing.T) {
+	h := newHarness(t)
+	_, pool, host := h.fleet()
+	h.valvePool(pool, store.MemoryBurstOff, 0)
+	heavy := h.valveRunner(pool, host, store.RunnerBusy)
+	h.c.setLastPlan(scheduler.Plan{RunnerNeeds: map[string]int64{heavy.ID: 6144}})
+
+	h.advance(4 * time.Minute)
+	h.c.setLastPlan(scheduler.Plan{})
+	if _, ok := ruleFor(memoryBeat(h, host), heavy.ID); !ok {
+		t.Fatal("needs four minutes old were dropped by a pass that could not read them")
+	}
+	h.advance(2 * time.Minute)
+	if got := memoryBeat(h, host); got != nil {
+		t.Fatalf("needs six minutes old still grant %+v with no pass to renew them", got)
+	}
+	h.c.setLastPlan(scheduler.Plan{})
+	h.c.mu.Lock()
+	kept := h.c.runnerNeeds
+	h.c.mu.Unlock()
+	if kept != nil {
+		t.Fatalf("a pass that could not read them kept needs six minutes old: %v", kept)
+	}
+	h.c.setLastPlan(scheduler.Plan{RunnerNeeds: map[string]int64{heavy.ID: 6144}})
+	if _, ok := ruleFor(memoryBeat(h, host), heavy.ID); !ok {
+		t.Fatal("a pass that read the needs again did not restore the grant")
+	}
+}
+
+// On an observing pool the Runners page shows the ceiling the agent is given,
+// the grant's, and the rule carries none of the pool's observed swap.
+func TestAGrantOnAnObservingPoolShowsAndSendsTheGrantOnly(t *testing.T) {
+	h := newHarness(t)
+	_, pool, host := h.fleet()
+	h.valvePool(pool, store.MemoryBurstObserve, 1024)
+	heavy := h.valveRunner(pool, host, store.RunnerBusy)
+	h.c.setLastPlan(scheduler.Plan{RunnerNeeds: map[string]int64{heavy.ID: 5120}})
+
+	if rule, _ := ruleFor(memoryBeat(h, host), heavy.ID); rule.CeilingMB != 5120 || rule.SpillMB != 0 || rule.Mode != store.MemoryBurstAutomatic {
+		t.Fatalf("rule = %+v, want automatic up to 5120 with no swap", rule)
+	}
+	v := h.c.runnerView(h.ctx, heavy).MemoryResource
+	if v == nil || v.CeilingMB != 5120 || v.SpillAllowedMB != 0 {
+		t.Fatalf("view = %+v, want the grant's 5120 ceiling and no swap allowance", v)
 	}
 }

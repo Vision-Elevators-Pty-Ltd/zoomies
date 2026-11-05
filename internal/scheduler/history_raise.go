@@ -256,11 +256,29 @@ func runnerNeeds(s Snapshot) map[string]int64 {
 // The figure is the most any job waiting on p is known to need (raiseNeedMB)
 // where that is above p's typed memory: GitHub, not Zoomies, decides which
 // waiting job an idle runner takes, so a raised runner is raised for the
-// heaviest. But only as many runners are raised as there are such jobs
-// waiting, less the raised runners of p that have no job yet (still starting,
-// or idle) and those this pass has already raised: one heavy job among five
-// light ones is one raised runner, not six, and a raised runner still waiting
-// for its job is not raised again on the next pass.
+// heaviest. How many runners are raised depends on whether the pool has a
+// second chance:
+//
+//   - A pool the valve can raise once a runner's job is known (a runner with
+//     limits of its own, raiseByValve on some host) raises only as many runners
+//     as there are such jobs waiting, less its raised runners still waiting for
+//     a job and those this pass has raised. One heavy job among five light ones
+//     is one raised runner: whichever runner the heavy job lands on, the valve
+//     lends it the rest once the job is known.
+//   - A pool that can only be raised at creation (a pair held to one shared
+//     limit, on every host that could run it) has no second chance: a heavy job
+//     GitHub hands a typed runner is killed at the typed size. So every runner
+//     created while such a job waits is raised, wherever a host has room. The
+//     cost is the pool's start rate while the heavy job waits: each raised start
+//     books and is charged its raised size, a quarter more than typed at the
+//     default headroom, and a start no host has room for raised is created at
+//     the typed size rather than wait, so a light job is never held for it.
+//
+// A raised runner counts as waiting only while it is live, has no job, is not
+// being reaped, drained or failed by this pass (acted), and was raised to at
+// least what this need would give it on its host, less one step: one raised to
+// 30 GB before a kill moved the need to 37.5 GB is not one the heavy job can
+// use.
 //
 // Zero, too, where nothing waiting needs more, where too little is known,
 // where the pool is not one history_raise is for, or where no host could
@@ -285,10 +303,16 @@ func (t *tick) raiseNeed(p *store.Pool, runners []*store.Runner, queued []*store
 	if heavy == 0 {
 		return 0
 	}
+	if !t.hosts.anyRaisesByValve(p) {
+		return need
+	}
 	waiting := t.raised[p.ID]
 	for _, r := range runners {
-		if r == nil || !r.State.Live() || t.stillRunning[r.ID] ||
+		if r == nil || !r.State.Live() || t.stillRunning[r.ID] || t.acted[r.ID] ||
 			r.AllocationSource != store.AllocationHistory || r.AllocatedMemoryMB <= p.Resources.MemoryMB {
+			continue
+		}
+		if r.AllocatedMemoryMB < min(need, HistoryRaiseCap(p, t.hosts.host(r.HostID)))-profileMemoryStep {
 			continue
 		}
 		switch r.State {
@@ -300,6 +324,27 @@ func (t *tick) raiseNeed(p *store.Pool, runners []*store.Runner, queued []*store
 		return 0
 	}
 	return need
+}
+
+// anyRaisesByValve reports whether any host here that could run p would let
+// the valve raise a runner of p once its job is known (raiseByValve).
+func (hs *hostSet) anyRaisesByValve(p *store.Pool) bool {
+	for _, h := range hs.hosts {
+		if HostCouldRun(h, p) && raiseByValve(p, h) {
+			return true
+		}
+	}
+	return false
+}
+
+// host is the host with this ID, or nil.
+func (hs *hostSet) host(id string) *store.Host {
+	for _, h := range hs.hosts {
+		if h.ID == id {
+			return h
+		}
+	}
+	return nil
 }
 
 // anyRaisesAtCreate reports whether any host here could create a runner of p

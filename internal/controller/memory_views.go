@@ -153,7 +153,14 @@ func memoryResourceViewFor(r *store.Runner, p *store.Pool, h *store.Host, needMB
 	}
 	if granted {
 		out.Mode, out.HistoryNeedMB = string(store.MemoryBurstAutomatic), grant.NeedMB
-		out.CeilingMB = max(out.CeilingMB, grant.CeilingMB)
+		if p.MemoryBurst.Enforces() {
+			// A lending pool keeps the larger ceiling, as the directive does.
+			out.CeilingMB = max(out.CeilingMB, grant.CeilingMB)
+		} else {
+			// An observing pool's ceiling is not lent up to; the grant's is the
+			// one the agent is given.
+			out.CeilingMB, out.SpillAllowedMB = grant.CeilingMB, 0
+		}
 	}
 	out.CeilingMB = max(out.CeilingMB, out.CurrentMB)
 	if v != nil {

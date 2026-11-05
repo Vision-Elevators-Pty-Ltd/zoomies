@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eyupio/zoomies/internal/store"
 )
@@ -433,11 +434,11 @@ func raisedCreates(as []Action) (raised, typed int) {
 	return raised, typed
 }
 
-// One heavy job among five light ones raises one runner, not six: GitHub may
-// hand the heavy job any of them, but six raised runners for one job halve the
-// pool's start rate for as long as it waits.
-func TestOneHeavyJobAmongLightOnesRaisesOneRunner(t *testing.T) {
-	p := trustedPool()
+// On a pool the valve can raise later, one heavy job among five light ones
+// raises one runner, not six: whichever runner GitHub hands the heavy job, the
+// valve lends it the rest once the job is known.
+func TestOneHeavyJobAmongLightOnesRaisesOneRunnerWhereTheValveCanRaiseLater(t *testing.T) {
+	p := nodockerPool()
 	raised, typed := raisedCreates(only(t, Decide(heavyAndLight(p))).Actions)
 	if raised != 1 || typed != 5 {
 		t.Fatalf("1 heavy and 5 light jobs created %d raised and %d typed runners, want 1 and 5", raised, typed)
@@ -452,11 +453,44 @@ func TestOneHeavyJobAmongLightOnesRaisesOneRunner(t *testing.T) {
 	}
 }
 
+// A pair held to one shared limit has no second chance: the valve cannot raise
+// its slice, and a heavy job GitHub hands a typed runner is killed at the
+// typed size. So every runner created while the heavy job waits is raised
+// where a host has room, and created at the typed size where none has, so the
+// light jobs never wait for it.
+func TestEveryRunnerOfASharedPairPoolIsRaisedWhileAHeavyJobWaits(t *testing.T) {
+	p := trustedPool()
+	raised, typed := raisedCreates(only(t, Decide(heavyAndLight(p))).Actions)
+	if raised != 6 || typed != 0 {
+		t.Fatalf("with room, 1 heavy and 5 light jobs created %d raised and %d typed runners, want 6 and 0", raised, typed)
+	}
+	// 17 GB free past each agent's 6 GB reserve holds one raised start (30% of
+	// 29.4 GB, 8.8 GB) and then room for a typed start (7.2 GB) but not another
+	// raised one: each agent takes one of each.
+	s := heavyAndLight(p)
+	for _, h := range s.Hosts {
+		withUsage(h, 12, 6*gb+17*gb)
+	}
+	raised, typed = raisedCreates(only(t, Decide(s)).Actions)
+	if raised != 2 || typed != 2 {
+		t.Fatalf("short of room, the pass created %d raised and %d typed runners, want 2 and 2", raised, typed)
+	}
+	// No room for any raised start: every runner typed, none held back.
+	s = heavyAndLight(p)
+	for _, h := range s.Hosts {
+		withUsage(h, 12, 6*gb+8*gb)
+	}
+	raised, typed = raisedCreates(only(t, Decide(s)).Actions)
+	if raised != 0 || typed == 0 {
+		t.Fatalf("with no room for a raised start the pass created %d raised and %d typed runners, want only typed", raised, typed)
+	}
+}
+
 // A raised runner still waiting for its job counts against the heavy jobs, so
 // the next pass does not raise another for the same one. Once it is running a
 // job it no longer does.
 func TestARaisedRunnerWithoutAJobIsNotRaisedAgainOnTheNextPass(t *testing.T) {
-	p := trustedPool()
+	p := nodockerPool()
 	s := heavyAndLight(p)
 	waiting := testRunner("run_raised", p, store.RunnerRegistering, 0)
 	waiting.HostID, waiting.AllocatedMemoryMB, waiting.AllocationSource = "a1", typecheckNeed, store.AllocationHistory
@@ -468,6 +502,92 @@ func TestARaisedRunnerWithoutAJobIsNotRaisedAgainOnTheNextPass(t *testing.T) {
 	s.RunnersWithAJob = map[string]bool{waiting.ID: true}
 	if raised, _ := raisedCreates(only(t, Decide(s)).Actions); raised != 1 {
 		t.Fatalf("with the raised runner busy on another job the pass raised %d, want 1", raised)
+	}
+}
+
+// A waiting raised runner smaller than the need it would serve does not count:
+// one raised to 29.4 GB before a kill moved the need to 30 GB and more is not
+// one the heavy job can use.
+func TestARaisedRunnerBelowTheNeedDoesNotCountAsWaiting(t *testing.T) {
+	p := nodockerPool()
+	s := heavyAndLight(p)
+	s.JobHistory[key("typecheck", p)] = append(typecheckRuns()[:18],
+		store.JobPeak{MemoryMB: 30079, OOMKilled: true, GrantedMemoryMB: 30080},
+		store.JobPeak{MemoryMB: 30079, OOMKilled: true, GrantedMemoryMB: 30080})
+	small := testRunner("run_small", p, store.RunnerIdle, 0)
+	small.HostID, small.AllocatedMemoryMB, small.AllocationSource = "a1", typecheckNeed, store.AllocationHistory
+	s.Runners = map[string][]*store.Runner{p.ID: {small}}
+	pp := only(t, Decide(s))
+	raised, _ := raisedCreates(pp.Actions)
+	if raised != 1 {
+		t.Fatalf("with an idle runner raised to %d MB for a need of 37.6 GB the pass raised %d, want 1", typecheckNeed, raised)
+	}
+	for _, a := range actionsOf(pp.Actions, ActionCreate) {
+		if a.SizedFromHistory && a.Size.MemoryMB != 37632 {
+			t.Fatalf("raised to %d MB, want 30080 x 1.25 = 37632", a.Size.MemoryMB)
+		}
+	}
+}
+
+// A raised runner this pass reaps is not waiting for anything: counting it
+// would leave the heavy job with no raised runner at all, because the creates
+// that replace it fill the pool.
+func TestARaisedRunnerReapedThisPassDoesNotCountAsWaiting(t *testing.T) {
+	p := nodockerPool()
+	s := heavyAndLight(p)
+	s.Policy.ProvisionTimeout = 5 * time.Minute
+	stuck := testRunner("run_stuck", p, store.RunnerProvisioning, time.Hour)
+	stuck.HostID, stuck.AllocatedMemoryMB, stuck.AllocationSource = "a1", typecheckNeed, store.AllocationHistory
+	s.Runners = map[string][]*store.Runner{p.ID: {stuck}}
+	pp := only(t, Decide(s))
+	failed := false
+	for _, a := range pp.Actions {
+		if a.RunnerID == stuck.ID && a.Kind != ActionCreate {
+			failed = true
+		}
+	}
+	if !failed {
+		t.Fatalf("the stuck runner was not reaped, so this is not the case it means to be: %+v", pp.Actions)
+	}
+	if raised, _ := raisedCreates(pp.Actions); raised != 1 {
+		t.Fatalf("with the raised runner reaped the pass raised %d, want 1", raised)
+	}
+}
+
+// A runner the valve will let grow is booked at its grant only on a host whose
+// agent can lend; elsewhere the grant can never be carried out.
+func TestARaisedRunnerIsBookedAtItsGrantOnlyWhereTheAgentCanLend(t *testing.T) {
+	p := nodockerPool()
+	h := trustedAgent("ci-nl-01-trusted", 40*gb)
+	r := typecheckOn("run_tc", p, h)
+	history := map[store.JobUsageKey][]store.JobPeak{key("typecheck", p): typecheckRuns()}
+	b := newBooker(BookingHistory, 25, &BookingInputs{RunnerJobs: map[string]store.JobUsageKey{r.ID: key("typecheck", p)}}, history, []*store.Pool{p}, nil)
+	b.raise = true
+	if got, _, basis := b.runner(p, h, r); got != typecheckNeed || basis != basisRaised {
+		t.Fatalf("on a host that can lend the runner books %d MB (%s), want %d", got, basis, typecheckNeed)
+	}
+	h.Features = store.StringSlice{store.FeatureDinDSharedLimit}
+	if got, charge, basis := b.runner(p, h, r); got != charge || got != 24*gb || basis != basisTyped {
+		t.Fatalf("on a host that cannot lend the runner books %d of %d MB (%s), want its typed 24 GB", got, charge, basis)
+	}
+}
+
+// Each kill at the raised size moves the next need up by the headroom, to twice
+// the typed size: 24 -> 30 -> 37.5 -> 46.9 -> 48 GB. Adaptive and bounded.
+func TestEachKillAtTheRaisedSizeMovesTheNeedUpToTheCap(t *testing.T) {
+	p := nodockerPool()
+	h := sized("big", 16, 64, 512*gb, 500*gb)
+	limit := 24 * gb
+	var got []int64
+	for range 5 {
+		runs := append(peaksOf(18, 9*gb), store.JobPeak{MemoryMB: limit - 1, OOMKilled: true, GrantedMemoryMB: limit})
+		need, _ := raiseNeedMB(runs, 25)
+		limit = min(need, HistoryRaiseCap(p, h))
+		got = append(got, limit)
+	}
+	want := []int64{30 * gb, 38400, 48000, 48 * gb, 48 * gb}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("successive kills raise to %v, want %v", got, want)
 	}
 }
 

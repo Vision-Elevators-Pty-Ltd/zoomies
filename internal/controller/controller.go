@@ -364,6 +364,10 @@ type Controller struct {
 	// grant a runner for its job's history. At most one pass old, and empty
 	// until the first pass after a start.
 	runnerNeeds map[string]int64
+	// runnerNeedsAt is when the pass that read runnerNeeds ran. Needs kept
+	// over passes that could not read them are dropped once they are older
+	// than keptNeedsFor.
+	runnerNeedsAt time.Time
 	// lease is this controller's claim on the database, renewed on a timer.
 	// leaseLost is set when a renewal found somebody else holding it, which is
 	// the fleet's worst state: two schedulers, both certain they are the only
@@ -1529,9 +1533,38 @@ func (c *Controller) setLastPlan(p scheduler.Plan) {
 	// none names an empty map). The last pass's grants stand then: dropping
 	// them would take a climbing job's valve rule away for no reason of its
 	// own, and a grant is only ever given to a runner that is still live.
-	if p.RunnerNeeds != nil || c.cfg().Scheduler.HistoryRaise != scheduler.HistoryRaiseOn {
-		c.runnerNeeds = p.RunnerNeeds
+	switch {
+	case p.RunnerNeeds != nil || c.cfg().Scheduler.HistoryRaise != scheduler.HistoryRaiseOn:
+		c.runnerNeeds, c.runnerNeedsAt = p.RunnerNeeds, c.lastPlanAt
+	case c.lastPlanAt.Sub(c.runnerNeedsAt) > c.keptNeedsFor():
+		c.runnerNeeds = nil
 	}
+}
+
+// keptNeedsFor is how long the runner needs of a pass that read them stand
+// over passes that could not. Long enough to ride out a busy database for
+// thirty passes at the default ten-second interval, which is the failure this
+// is for; short against the life of a job, so a reusable runner's grant is not
+// carried for long onto a job it was never worked out for. After it the
+// grants are dropped: a job still climbing then has the limit it already
+// holds, which is what it had before the setting existed.
+//
+// Never less than three passes, so a fleet whose interval is set long does
+// not lose its grants between two passes that both read the history.
+const keptNeedsFor = 5 * time.Minute
+
+func (c *Controller) keptNeedsFor() time.Duration {
+	return max(keptNeedsFor, 3*c.schedulerInterval())
+}
+
+// liveNeedsLocked is runnerNeeds while they are no older than keptNeedsFor,
+// and nil after: a controller whose passes have stopped altogether does not
+// keep granting from what it last knew. c.mu is held.
+func (c *Controller) liveNeedsLocked() map[string]int64 {
+	if c.runnerNeeds == nil || c.Now().Sub(c.runnerNeedsAt) > c.keptNeedsFor() {
+		return nil
+	}
+	return c.runnerNeeds
 }
 
 // runnerNeed is what the last pass found the job a runner is running needs,
@@ -1540,7 +1573,7 @@ func (c *Controller) setLastPlan(p scheduler.Plan) {
 func (c *Controller) runnerNeed(id string) int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.runnerNeeds[id]
+	return c.liveNeedsLocked()[id]
 }
 
 // historyNeeds is a copy of runnerNeeds while scheduler.history_raise is on,
@@ -1552,7 +1585,7 @@ func (c *Controller) historyNeeds() map[string]int64 {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return maps.Clone(c.runnerNeeds)
+	return maps.Clone(c.liveNeedsLocked())
 }
 
 // historyGrant is the memory-valve rule a runner r of p on h is given for its

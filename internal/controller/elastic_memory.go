@@ -38,8 +38,9 @@ type memoryHostState struct {
 	At      time.Time
 	Pool    scheduler.MemoryPool
 	FloorMB int64
-	// Observing and Enforcing count the runners with a rule, by mode.
-	Observing, Enforcing int
+	// Observing and Enforcing count the runners with a rule, by mode, and
+	// History those whose rule is a grant for their job's history.
+	Observing, Enforcing, History int
 	// Supported is whether the host's agent carries the rules out.
 	Supported bool
 	// ShortAt is when a runner here was last reported as refused memory because
@@ -195,6 +196,10 @@ func (c *Controller) elasticMemoryDirective(ctx context.Context, h *store.Host, 
 		rules     []agent.ElasticMemoryRunner
 		starting  = make(map[string]int)
 		out       memoryHostState
+		// historyMB is what the history grants may lend beyond what their
+		// runners would be given without them, and granted names them.
+		historyMB int64
+		granted   = map[string]bool{}
 	)
 	for _, r := range runners {
 		if r == nil || !r.State.Live() {
@@ -224,20 +229,50 @@ func (c *Controller) elasticMemoryDirective(ctx context.Context, h *store.Host, 
 		workloads = append(workloads, scheduler.MemoryWorkload{
 			ID: r.ID, GuaranteeMB: guarantee, LentMB: lent, Idle: r.State == store.RunnerIdle,
 		})
-		if !p.MemoryBurst.Observes() || !valveRunnerState(r.State) || r.AllocatedMemoryMB <= 0 || guarantee <= 0 {
+		if !valveRunnerState(r.State) || r.AllocatedMemoryMB <= 0 || guarantee <= 0 {
 			continue
 		}
 		if p.Backend != store.BackendDocker && p.Backend != store.BackendPodman {
 			continue
 		}
-		ceiling := scheduler.MemoryCeiling(p, h, guarantee)
-		if ceiling <= guarantee {
+		var rule *agent.ElasticMemoryRunner
+		if p.MemoryBurst.Observes() {
+			if ceiling := scheduler.MemoryCeiling(p, h, guarantee); ceiling > guarantee {
+				rule = &agent.ElasticMemoryRunner{
+					RunnerID: r.ID, Mode: p.MemoryBurst.Mode, GuaranteeMB: guarantee, CeilingMB: ceiling, SpillMB: p.MemoryBurst.SpillMB,
+				}
+			}
+		}
+		// A runner whose job is known to need more than it was created with is
+		// lent up to that need, whatever its pool's own setting. Always carried
+		// out: a grant observed would be a runner left to be killed at the limit
+		// its job is known to outgrow. A pool that lends already keeps the
+		// larger ceiling of the two. A pool that only observes gives the runner
+		// an automatic rule at the grant's ceiling and no higher: its own
+		// ceiling is a figure the operator asked to watch, not to lend up to,
+		// and the grant is the part the job's history accounts for.
+		if g, ok := c.historyGrant(p, h, r); ok {
+			switch {
+			case rule == nil || rule.Mode != store.MemoryBurstAutomatic:
+				historyMB += g.CeilingMB - guarantee
+				// A new rule, not the observing one made real: the observing
+				// pool's swap allowance was never one it asked to be given.
+				rule = &agent.ElasticMemoryRunner{RunnerID: r.ID, GuaranteeMB: guarantee,
+					Mode: store.MemoryBurstAutomatic, CeilingMB: g.CeilingMB}
+				granted[r.ID] = true
+				out.History++
+			case g.CeilingMB > rule.CeilingMB:
+				historyMB += g.CeilingMB - rule.CeilingMB
+				rule.CeilingMB = g.CeilingMB
+				granted[r.ID] = true
+				out.History++
+			}
+		}
+		if rule == nil {
 			continue
 		}
-		rules = append(rules, agent.ElasticMemoryRunner{
-			RunnerID: r.ID, Mode: p.MemoryBurst.Mode, GuaranteeMB: guarantee, CeilingMB: ceiling, SpillMB: p.MemoryBurst.SpillMB,
-		})
-		if p.MemoryBurst.Enforces() {
+		rules = append(rules, *rule)
+		if rule.Mode == store.MemoryBurstAutomatic {
 			out.Enforcing++
 		} else {
 			out.Observing++
@@ -254,7 +289,7 @@ func (c *Controller) elasticMemoryDirective(ctx context.Context, h *store.Host, 
 	}
 	in := scheduler.MemoryPoolInput{
 		TotalMB: h.MemoryMB, FloorMB: scheduler.MemoryPoolFloor(h),
-		StartReserveMB: startReserve, Workloads: workloads,
+		StartReserveMB: startReserve, Workloads: workloads, HistoryGrantMB: historyMB,
 	}
 	if h.Usage.Fresh(now) {
 		in.AvailableMB = h.Usage.MemoryAvailableMB
@@ -270,7 +305,7 @@ func (c *Controller) elasticMemoryDirective(ctx context.Context, h *store.Host, 
 		}
 		*s = out
 	})
-	c.observeMemoryReports(ctx, h, runners, poolByID, reports, supported, now)
+	c.observeMemoryReports(ctx, h, runners, poolByID, reports, granted, supported, now)
 	if !supported {
 		return nil
 	}
@@ -281,16 +316,25 @@ func (c *Controller) elasticMemoryDirective(ctx context.Context, h *store.Host, 
 // this heartbeat: a decision count per pool, mode and outcome, which is what
 // observe mode exists to produce, and the times a pool's runners were last
 // refused memory, which is what the problems read.
-func (c *Controller) observeMemoryReports(ctx context.Context, h *store.Host, runners []*store.Runner, pools map[string]*store.Pool, reports map[string]agent.RunnerReport, supported bool, now time.Time) {
+//
+// A runner granted memory for its job's history (granted) is counted as the
+// automatic rule it is, and a refusal for want of memory on the host is held
+// against the host as any lending pool's is; reaching its ceiling is not held
+// against the pool, whose own ceiling is not what bound it.
+func (c *Controller) observeMemoryReports(ctx context.Context, h *store.Host, runners []*store.Runner, pools map[string]*store.Pool, reports map[string]agent.RunnerReport, granted map[string]bool, supported bool, now time.Time) {
 	for _, r := range runners {
 		if r == nil || !valveRunnerState(r.State) {
 			continue
 		}
 		p := pools[r.PoolID]
-		if p == nil || !p.MemoryBurst.Observes() {
+		history := granted[r.ID]
+		if p == nil || (!p.MemoryBurst.Observes() && !history) {
 			continue
 		}
 		mode := string(p.MemoryBurst.Mode)
+		if history {
+			mode = string(store.MemoryBurstAutomatic)
+		}
 		outcome := "unreported"
 		switch rep, ok := reports[r.ID]; {
 		case !supported:
@@ -305,10 +349,13 @@ func (c *Controller) observeMemoryReports(ctx context.Context, h *store.Host, ru
 			// runners draw on a pool its own virtual loans drain, and "it would have
 			// been refused" is evidence on the runner and in the decision counts, not
 			// a host that ran out of memory and a runner that "was not given it".
-			if p.MemoryBurst.Enforces() {
+			if p.MemoryBurst.Enforces() || history {
 				c.mutateMemoryState(h.ID, func(s *memoryHostState) { s.ShortAt, s.ShortCode = now, agent.MemoryValveCode(outcome) })
 			}
 		case agent.MemoryAtCeiling:
+			if history {
+				continue
+			}
 			c.mutateMemoryState(h.ID, func(s *memoryHostState) { s.CeilingAt[p.ID] = now })
 		}
 	}

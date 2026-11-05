@@ -12758,6 +12758,13 @@ components:
         would_spill_mb: { type: integer, format: int64 }
         near_limit: { type: boolean, description: Whether the runner has come within a tenth of a memory limit at any point in its life. }
         raises: { type: integer, description: How many times a limit was raised for it. }
+        history_need_mb:
+          type: integer
+          format: int64
+          description: >-
+            For a runner whose job is known to need more than it was created with, what the job's
+            history says it needs (`scheduler.history_raise`). The valve may raise the runner towards
+            it whatever its pool's own valve setting is, and `ceiling_mb` is what that allows.
 
     RunnerScratch:
       type: object
@@ -15147,6 +15154,8 @@ components:
         binding: { type: string, enum: [ledger, measured], description: "What limited the capacity: the promises already made, or the memory the host measured as free." }
         observing: { type: integer, description: Runners on the host with a rule in observe mode. }
         enforcing: { type: integer, description: Runners on the host with a rule in automatic mode. }
+        history: { type: integer, description: "Of those, the runners whose rule is a grant for their job's history (`scheduler.history_raise`): the job is known to need more than the runner was created with." }
+        history_grant_mb: { type: integer, format: int64, description: "What was added to the capacity for those grants, beyond what the guarantees leave. What the host measured as free still bounds the capacity." }
         short_at: { type: string, format: date-time, description: When a runner here was last refused memory because the host had none to give. Absent after fifteen minutes. }
         short_code: { type: string, enum: [pool_empty, host_floor] }
         at: { type: string, format: date-time, description: When the pool was last worked out. }
@@ -15549,6 +15558,11 @@ components:
         by_history:
           type: integer
           description: How many of them are booked below their size.
+        raised_by_history:
+          type: integer
+          description: >-
+            How many of them are booked above their size: runners whose job is known to need more,
+            booked at what `scheduler.history_raise` lets them grow to.
         machine:
           type: string
           description: >-

@@ -162,6 +162,7 @@ than about what any one setting says.
 | Code | Severity | Setting | What to do |
 | --- | --- | --- | --- |
 | `scheduler.history_sizing` | error | `scheduler.history_sizing` | Use `off`, `shadow` or `on`. |
+| `scheduler.history_raise` | error | `scheduler.history_raise` | Use `on` or `off`. |
 | `security.auto_apply_remedies` | error | `security.auto_apply_remedies` | Use `off`, `shadow` or `on` (`false` and `true` are still read as `off` and `on`). |
 | `scheduler.host_order` | error | `scheduler.host_order` | Use `headroom`, `largest_standard` or `best_fit`. |
 | `scheduler.placement_mode` | error | `scheduler.placement_mode` | Use `headroom`, `shadow` or `readiness`. |

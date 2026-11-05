@@ -142,6 +142,11 @@ type Policy struct {
 	// and the host has a fresh sample. See booker.
 	MemoryBooking                string
 	MemoryBookingHeadroomPercent int
+	// HistoryRaise is scheduler.history_raise: on lets a runner of a pool with
+	// a typed memory size hold more than it where its job's history says the
+	// job needs more (see history_raise.go). Anything else, the zero value
+	// included, keeps every runner at its typed size.
+	HistoryRaise string
 	// MachineLabel is scheduler.machine_label: hosts carrying the same value of
 	// this label are agents on one machine, and share its memory ceiling and
 	// its measured free memory. Empty treats every host as a machine of its own.
@@ -384,6 +389,13 @@ type Plan struct {
 	// sizes, and the machine they count against. Nil with memory overcommit
 	// off, where every runner is booked its size against its own host.
 	Bookings map[string]*HostBooking `json:"-"`
+	// RunnerNeeds is, by runner ID, what the history of the job each live
+	// runner is running says it needs, for the runners whose need is above
+	// what they were created with (scheduler.history_raise). The controller
+	// turns each into a memory-valve rule (HistoryGrantFor). Nil with
+	// history_raise off, and where the snapshot had no Booking to say which
+	// job each runner runs; empty where it did and no runner needs more.
+	RunnerNeeds map[string]int64 `json:"-"`
 }
 
 // UnmatchedJob is a queued job no pool claimed, and why.
@@ -403,13 +415,17 @@ func Decide(s Snapshot) Plan {
 	pools := sortedPools(s.Pools)
 	demand, unmatched := assign(pools, s.Jobs, targetsOf(s.Installations))
 
+	book := newBooker(s.Policy.MemoryBooking, s.Policy.MemoryBookingHeadroomPercent, s.Booking, s.JobHistory, pools, demand)
+	if book != nil {
+		book.raise = s.Policy.historyRaise()
+	}
 	t := &tick{
 		now:    s.Now,
 		policy: s.Policy,
 		hosts: newHostSetFrom(s.Hosts, pools, s.Runners, s.Now, ledger{
 			overcommitPercent: s.Policy.MemoryOvercommitPercent, cpuOvercommitPercent: s.Policy.CPUOvercommitPercent,
 			startChargePercent: s.Policy.StartChargePercent, machineLabel: s.Policy.MachineLabel,
-			book: newBooker(s.Policy.MemoryBooking, s.Policy.MemoryBookingHeadroomPercent, s.Booking, s.JobHistory, pools, demand),
+			book: book,
 		}),
 		budget:             s.Policy.MaxCreatesPerTick,
 		activeByRepository: s.ActiveByRepository,
@@ -428,10 +444,19 @@ func Decide(s Snapshot) Plan {
 		t.budget = math.MaxInt
 	}
 
-	plan := Plan{Pools: make([]PoolPlan, 0, len(pools)), Unmatched: unmatched, Bookings: t.hosts.bookings}
+	plan := Plan{Pools: make([]PoolPlan, 0, len(pools)), Unmatched: unmatched, Bookings: t.hosts.bookings, RunnerNeeds: runnerNeeds(s)}
 	for _, p := range pools {
 		pp := t.decidePool(p, s.Runners[p.ID], demand[p.ID])
 		plan.Pools = append(plan.Pools, pp)
+		for _, a := range pp.Actions {
+			if a.RunnerID == "" {
+				continue
+			}
+			if t.acted == nil {
+				t.acted = map[string]bool{}
+			}
+			t.acted[a.RunnerID] = true
+		}
 	}
 	if limit := s.Policy.MaxRunners; limit > 0 {
 		// Counted after the reap, from what each pool still holds, so a runner
@@ -487,6 +512,12 @@ type tick struct {
 	// history and historySizing are Snapshot.JobHistory and HistorySizing.
 	history       map[store.JobUsageKey][]store.JobPeak
 	historySizing string
+	// raised counts, by pool ID, the runners this pass has created above their
+	// typed size for the jobs waiting (scheduler.history_raise), and acted is
+	// every runner this pass reaps, fails, drains or removes: neither is one a
+	// waiting job can still be handed.
+	raised map[string]int
+	acted  map[string]bool
 }
 
 // assign maps every queued job onto the pool that will run it, and collects the
@@ -1012,7 +1043,32 @@ func (t *tick) grant(p *store.Pool, plan *PoolPlan, runners []*store.Runner, que
 	if enforce {
 		t.hosts.need = &need
 	}
-	placed := t.hosts.placeAvoiding(p, 1, recentBusyHosts(runners, t.now))
+	avoid := recentBusyHosts(runners, t.now)
+	// A job waiting here that is known to need more than the pool's typed
+	// size is placed for first, on a host with room for it raised. Where none
+	// has, the runner is placed exactly as it would be without the raise: a
+	// typed size that may be too small for one job is better than holding
+	// every job on the pool for a host to free up, which is the deadlock that
+	// placing for the heaviest job alone produced on 1 Nov.
+	var placed []placement
+	raiseMB, unraised := t.raiseNeed(p, runners, queued), ""
+	if raiseMB > 0 {
+		t.hosts.raise = raiseMB
+		placed = t.hosts.placeAvoiding(p, 1, avoid)
+		t.hosts.raise = 0
+		if len(placed) > 0 {
+			if t.raised == nil {
+				t.raised = map[string]int{}
+			}
+			t.raised[p.ID]++
+		} else {
+			unraised = fmt.Sprintf("not raised for job history: the jobs waiting need ~%s, above the pool's %s, and no host has room for that now",
+				formatMB(raiseMB), formatMB(p.Resources.MemoryMB))
+		}
+	}
+	if len(placed) == 0 {
+		placed = t.hosts.placeAvoiding(p, 1, avoid)
+	}
 	t.hosts.need = nil
 	if len(placed) == 0 && enforce && len(heldOff) > 0 {
 		// Some host would have taken a runner at the pool's own size, and
@@ -1061,7 +1117,10 @@ func (t *tick) grant(p *store.Pool, plan *PoolPlan, runners []*store.Runner, que
 		reason += fmt.Sprintf(" (%s deferred by the repository limit for %s)",
 			plural(plan.QuotaDeferredJobs, "job"), strings.Join(plan.QuotaDeferredRepositories, ", "))
 	}
-	if size := placed[0].size; size != nil && placed[0].raised {
+	if size := placed[0].size; size != nil && placed[0].raisedFor > 0 {
+		reason += fmt.Sprintf(" (raised to %s for job history: the jobs waiting need ~%s, above the pool's %s)",
+			sizePhrase(size.CPUs, size.MemoryMB), formatMB(placed[0].raisedFor), formatMB(p.Resources.MemoryMB))
+	} else if size != nil && placed[0].raised {
 		reason += fmt.Sprintf(" (sized to %s)", sizePhrase(size.CPUs, size.MemoryMB))
 	} else if size != nil {
 		// Said in the reason as well as carried, so the Runners page and the
@@ -1079,6 +1138,9 @@ func (t *tick) grant(p *store.Pool, plan *PoolPlan, runners []*store.Runner, que
 	}
 	if b := placed[0].booking; b != "" {
 		reason += " (" + b + ")"
+	}
+	if unraised != "" {
+		reason += " (" + unraised + ")"
 	}
 	switch {
 	case enforce:
@@ -1379,6 +1441,11 @@ type hostSet struct {
 	// under scheduler.history_sizing=on: a host that cannot hold it is not
 	// eligible, and the runner is sized up to it where its pool allows.
 	need *Requirement
+	// raise is set while a runner of a pool with a typed memory size is being
+	// placed at a larger size for the jobs waiting on it
+	// (scheduler.history_raise): the memory they need. A host that cannot
+	// raise the runner, or has no room for it raised, is not eligible.
+	raise int64
 }
 
 // newHostSet seeds each host with its allocatable resources less what the
@@ -1748,6 +1815,10 @@ type placement struct {
 	// raised says size is larger than the standard, not smaller: the runner
 	// was sized up to what the jobs waiting are known to need.
 	raised bool
+	// raisedFor is, for a runner of a typed pool created above its typed
+	// memory (scheduler.history_raise), the need it was raised for; zero
+	// otherwise.
+	raisedFor int64
 	// booking says how the runner was booked in the overcommitted ledger, for
 	// the reason; empty where it was booked its size against its own host.
 	booking string
@@ -1786,6 +1857,10 @@ func (hs *hostSet) placeAvoiding(p *store.Pool, n int, avoid map[string]bool) []
 		res := Reservation{}
 		if h != nil {
 			res = Reserve(p, h)
+		} else if hs.raise > 0 {
+			// A raise is the pool's size and more, never less: a host with no
+			// room for the raise is one the unraised placement asks again.
+			break
 		} else {
 			var grant store.Resources
 			h, res, grant = hs.pickReduced(p, avoid)
@@ -1799,6 +1874,13 @@ func (hs *hostSet) placeAvoiding(p *store.Pool, n int, avoid map[string]bool) []
 			before := size
 			res, size = sizeForNeed(p, h, res, size, *hs.need)
 			raised = size != before
+		}
+		var raisedFor int64
+		if target := hs.raiseTo(h, p); target > 0 {
+			// Charged, booked and measured at the larger size below, exactly as
+			// a runner of a pool typed that large would be.
+			res.MemoryMB = target
+			size, raised, raisedFor = raisedSize(p, h, res, size, target), true, hs.raise
 		}
 		hs.free[h.ID]--
 		hs.warming[h.ID]++
@@ -1842,7 +1924,7 @@ func (hs *hostSet) placeAvoiding(p *store.Pool, n int, avoid map[string]bool) []
 			}
 			hs.observedCPU[h.ID] = max(cpu-charge, 0)
 		}
-		out = append(out, placement{hostID: h.ID, size: size, raised: raised, booking: hs.bookingPhrase(h, book, res.MemoryMB)})
+		out = append(out, placement{hostID: h.ID, size: size, raised: raised, raisedFor: raisedFor, booking: hs.bookingPhrase(h, book, res.MemoryMB)})
 	}
 	return out
 }
@@ -1937,7 +2019,8 @@ func (hs *hostSet) pick(p *store.Pool, avoid map[string]bool) *store.Host {
 }
 
 func (hs *hostSet) eligible(h *store.Host, p *store.Pool) bool {
-	return hs.eligibleAsSized(h, p) && (hs.need == nil || hs.shortOf(h, p, *hs.need) == "")
+	return hs.eligibleAsSized(h, p) && (hs.need == nil || hs.shortOf(h, p, *hs.need) == "") &&
+		(hs.raise <= 0 || hs.raiseFits(h, p))
 }
 
 // eligibleAsSized is eligible without a job history's requirement: whether h
@@ -1992,6 +2075,14 @@ func (hs *hostSet) leftFor(h *store.Host, p *store.Pool) Reservation {
 // A stated size keeps the measured check even on an idle host. An operator
 // who wrote 8 GB meant the job needs it, and 6 GB free is not 8.
 func (hs *hostSet) memoryLeft(h *store.Host, p *store.Pool) int64 {
+	return hs.memoryLeftAt(h, p, Reserve(p, h).MemoryMB)
+}
+
+// memoryLeftAt is memoryLeft for a runner of p created at typed MB rather than
+// at its pool's size: a runner raised for its jobs' history asks the booking
+// and the measurement for its raised size, charged the way a runner of a pool
+// typed that large would be.
+func (hs *hostSet) memoryLeftAt(h *store.Host, p *store.Pool, typed int64) int64 {
 	if p.Resources.MemoryMB <= 0 && !hs.ours[h.ID] {
 		return hs.promisedMemory[h.ID]
 	}
@@ -2006,7 +2097,6 @@ func (hs *hostSet) memoryLeft(h *store.Host, p *store.Pool) int64 {
 	// asks the booking for that much, so the booking is read as larger by the
 	// difference. With every runner booked whole and charged whole this is
 	// exactly the room left.
-	typed := Reserve(p, h).MemoryMB
 	var cheaper int64
 	if hs.byHistory[h.ID] {
 		cheaper = typed - hs.book.start(p, typed, hs.need)

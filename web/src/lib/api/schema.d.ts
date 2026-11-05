@@ -8659,6 +8659,11 @@ export interface components {
             near_limit?: boolean;
             /** @description How many times a limit was raised for it. */
             raises?: number;
+            /**
+             * Format: int64
+             * @description For a runner whose job is known to need more than it was created with, what the job's history says it needs (`scheduler.history_raise`). The valve may raise the runner towards it whatever its pool's own valve setting is, and `ceiling_mb` is what that allows.
+             */
+            history_need_mb?: number;
         };
         /** @description Which of a runner's folders its pool keeps in memory, as they were worked out when it was created. Recorded rather than recomputed, because a pool edited since would give a different answer than the one the running job was started with. Absent for a runner whose pool keeps none. */
         RunnerScratch: {
@@ -10816,6 +10821,13 @@ export interface components {
             observing: number;
             /** @description Runners on the host with a rule in automatic mode. */
             enforcing: number;
+            /** @description Of those, the runners whose rule is a grant for their job's history (`scheduler.history_raise`): the job is known to need more than the runner was created with. */
+            history?: number;
+            /**
+             * Format: int64
+             * @description What was added to the capacity for those grants, beyond what the guarantees leave. What the host measured as free still bounds the capacity.
+             */
+            history_grant_mb?: number;
             /**
              * Format: date-time
              * @description When a runner here was last refused memory because the host had none to give. Absent after fifteen minutes.
@@ -11141,6 +11153,8 @@ export interface components {
             typed_memory_mb: number;
             /** @description How many of them are booked below their size. */
             by_history?: number;
+            /** @description How many of them are booked above their size: runners whose job is known to need more, booked at what `scheduler.history_raise` lets them grow to. */
+            raised_by_history?: number;
             /** @description The value of `scheduler.machine_label` this host shares with other agents on one machine. Empty for a host that is a machine of its own. */
             machine?: string;
             /** @description The agents on that machine. */

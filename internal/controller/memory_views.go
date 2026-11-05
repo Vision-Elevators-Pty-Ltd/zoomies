@@ -63,6 +63,23 @@ type MemoryResourceView struct {
 	// Raises how many times a limit was raised for it.
 	NearLimit bool `json:"near_limit,omitempty"`
 	Raises    int  `json:"raises,omitempty"`
+	// HistoryNeedMB is, for a runner whose job is known to need more than it
+	// was created with, what the job's history says it needs: the valve may
+	// raise it towards that (scheduler.history_raise) whatever its pool's own
+	// valve setting is, and CeilingMB is what that allows.
+	HistoryNeedMB int64 `json:"history_need_mb,omitempty"`
+}
+
+// joinReasons puts two sentences of a reason together, either of which may be
+// empty.
+func joinReasons(first, second string) string {
+	switch {
+	case first == "":
+		return second
+	case second == "":
+		return first
+	}
+	return first + "; " + second
 }
 
 // valveOutcome is a decision code as a metric label. The code is an agent's word,
@@ -92,9 +109,17 @@ func blockedCode(code string) bool {
 // runner it has nothing to say about: its pool does not have the valve on and it
 // holds no loan.
 func memoryResourceView(r *store.Runner, p *store.Pool, h *store.Host) *MemoryResourceView {
+	return memoryResourceViewFor(r, p, h, 0)
+}
+
+// memoryResourceViewFor is memoryResourceView for a runner whose job is known to
+// need needMB (zero for none): a runner given a rule for its job's history is
+// one the valve watches, whatever its pool's own setting.
+func memoryResourceViewFor(r *store.Runner, p *store.Pool, h *store.Host, needMB int64) *MemoryResourceView {
 	if r == nil || p == nil || r.AllocatedMemoryMB <= 0 {
 		return nil
 	}
+	grant, granted := scheduler.HistoryGrantFor(p, h, r, needMB)
 	var sample backend.Stats
 	if len(r.ResourceSample) > 0 {
 		_ = json.Unmarshal(r.ResourceSample, &sample)
@@ -104,7 +129,7 @@ func memoryResourceView(r *store.Runner, p *store.Pool, h *store.Host) *MemoryRe
 	if v != nil {
 		lent = max(lent, v.LentBytes>>20)
 	}
-	if !p.MemoryBurst.Observes() && lent == 0 && (v == nil || v.SpillBytes == 0) {
+	if !granted && !p.MemoryBurst.Observes() && lent == 0 && (v == nil || v.SpillBytes == 0) {
 		return nil
 	}
 
@@ -126,6 +151,17 @@ func memoryResourceView(r *store.Runner, p *store.Pool, h *store.Host) *MemoryRe
 	if p.MemoryBurst.Observes() {
 		out.CeilingMB = scheduler.MemoryCeiling(p, h, guaranteed)
 	}
+	if granted {
+		out.Mode, out.HistoryNeedMB = string(store.MemoryBurstAutomatic), grant.NeedMB
+		if p.MemoryBurst.Enforces() {
+			// A lending pool keeps the larger ceiling, as the directive does.
+			out.CeilingMB = max(out.CeilingMB, grant.CeilingMB)
+		} else {
+			// An observing pool's ceiling is not lent up to; the grant's is the
+			// one the agent is given.
+			out.CeilingMB, out.SpillAllowedMB = grant.CeilingMB, 0
+		}
+	}
 	out.CeilingMB = max(out.CeilingMB, out.CurrentMB)
 	if v != nil {
 		out.Mode = v.Mode
@@ -138,6 +174,11 @@ func memoryResourceView(r *store.Runner, p *store.Pool, h *store.Host) *MemoryRe
 		if blockedCode(v.Code) {
 			out.Blocked = v.Code
 		}
+	}
+	if granted {
+		// Said first, because it is why the runner may hold more than its
+		// pool's size at all; the valve's own word on what it did follows.
+		out.Reason = joinReasons(grant.Reason(), out.Reason)
 	}
 	switch {
 	case out.SpillMB > 0:
@@ -270,8 +311,13 @@ type MemoryPoolView struct {
 	// made, "measured" for the memory the host reported as free.
 	Binding string `json:"binding"`
 	// Observing and Enforcing count the runners here with a rule, by mode.
-	Observing int `json:"observing"`
-	Enforcing int `json:"enforcing"`
+	// History counts those whose rule is a grant for their job's history
+	// (scheduler.history_raise), and HistoryGrantMB is what was added to the
+	// capacity for them.
+	Observing      int   `json:"observing"`
+	Enforcing      int   `json:"enforcing"`
+	History        int   `json:"history,omitempty"`
+	HistoryGrantMB int64 `json:"history_grant_mb,omitempty"`
 	// ShortAt is when a runner here was last refused memory because the host had
 	// none to give, and ShortCode which of pool_empty or host_floor it was.
 	ShortAt   *time.Time `json:"short_at,omitempty"`
@@ -291,7 +337,7 @@ func (c *Controller) memoryPoolView(h *store.Host) *MemoryPoolView {
 		Supported: s.Supported, CapacityMB: s.Pool.CapacityMB, LentMB: s.Pool.LentMB, PoolMB: s.Pool.PoolMB,
 		FloorMB: s.FloorMB, CommittedMB: s.Pool.CommittedMB, IdleReserveMB: s.Pool.IdleReserveMB,
 		StartReserveMB: s.Pool.StartReserveMB, Binding: string(s.Pool.Binding),
-		Observing: s.Observing, Enforcing: s.Enforcing, At: s.At,
+		Observing: s.Observing, Enforcing: s.Enforcing, History: s.History, HistoryGrantMB: s.Pool.HistoryGrantMB, At: s.At,
 	}
 	if !s.ShortAt.IsZero() && c.Now().Sub(s.ShortAt) < memoryBlockedFor {
 		at := s.ShortAt

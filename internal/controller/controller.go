@@ -358,6 +358,16 @@ type Controller struct {
 	// bookings is how the last pass's overcommitted memory ledger saw each
 	// host (scheduler.Plan.Bookings), for the Hosts page.
 	bookings map[string]*scheduler.HostBooking
+	// runnerNeeds is what the last pass found each runner's job needs, where
+	// that is above what the runner was created with
+	// (scheduler.Plan.RunnerNeeds): what each heartbeat's memory-valve rules
+	// grant a runner for its job's history. At most one pass old, and empty
+	// until the first pass after a start.
+	runnerNeeds map[string]int64
+	// runnerNeedsAt is when the pass that read runnerNeeds ran. Needs kept
+	// over passes that could not read them are dropped once they are older
+	// than keptNeedsFor.
+	runnerNeedsAt time.Time
 	// lease is this controller's claim on the database, renewed on a timer.
 	// leaseLost is set when a renewal found somebody else holding it, which is
 	// the fleet's worst state: two schedulers, both certain they are the only
@@ -1109,6 +1119,7 @@ func (c *Controller) policy() scheduler.Policy {
 		MemoryBooking:                c.cfg().Scheduler.MemoryBooking,
 		MemoryBookingHeadroomPercent: c.cfg().Scheduler.MemoryBookingHeadroomPercent,
 		MachineLabel:                 c.cfg().Scheduler.MachineLabel,
+		HistoryRaise:                 c.cfg().Scheduler.HistoryRaise,
 		MaxRunnerLifetime:            c.cfg().Scheduler.MaxRunnerLifetime,
 		ProvisionTimeout:             c.cfg().Scheduler.ProvisionTimeout,
 		DrainTimeout:                 c.cfg().Scheduler.DrainTimeout,
@@ -1517,6 +1528,75 @@ func (c *Controller) setLastPlan(p scheduler.Plan) {
 	c.lastPlan = &p
 	c.lastPlanAt = c.Now()
 	c.bookings = p.Bookings
+	// A plan that could not read the jobs' history, or which job each runner
+	// runs, names no needs at all (nil, where a plan that read them and found
+	// none names an empty map). The last pass's grants stand then: dropping
+	// them would take a climbing job's valve rule away for no reason of its
+	// own, and a grant is only ever given to a runner that is still live.
+	switch {
+	case p.RunnerNeeds != nil || c.cfg().Scheduler.HistoryRaise != scheduler.HistoryRaiseOn:
+		c.runnerNeeds, c.runnerNeedsAt = p.RunnerNeeds, c.lastPlanAt
+	case c.lastPlanAt.Sub(c.runnerNeedsAt) > c.keptNeedsFor():
+		c.runnerNeeds = nil
+	}
+}
+
+// keptNeedsFor is how long the runner needs of a pass that read them stand
+// over passes that could not. Long enough to ride out a busy database for
+// thirty passes at the default ten-second interval, which is the failure this
+// is for; short against the life of a job, so a reusable runner's grant is not
+// carried for long onto a job it was never worked out for. After it the
+// grants are dropped: a job still climbing then has the limit it already
+// holds, which is what it had before the setting existed.
+//
+// Never less than three passes, so a fleet whose interval is set long does
+// not lose its grants between two passes that both read the history.
+const keptNeedsFor = 5 * time.Minute
+
+func (c *Controller) keptNeedsFor() time.Duration {
+	return max(keptNeedsFor, 3*c.schedulerInterval())
+}
+
+// liveNeedsLocked is runnerNeeds while they are no older than keptNeedsFor,
+// and nil after: a controller whose passes have stopped altogether does not
+// keep granting from what it last knew. c.mu is held.
+func (c *Controller) liveNeedsLocked() map[string]int64 {
+	if c.runnerNeeds == nil || c.Now().Sub(c.runnerNeedsAt) > c.keptNeedsFor() {
+		return nil
+	}
+	return c.runnerNeeds
+}
+
+// runnerNeed is what the last pass found the job a runner is running needs,
+// where that is above what the runner was created with and
+// scheduler.history_raise is on; zero otherwise.
+func (c *Controller) runnerNeed(id string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.liveNeedsLocked()[id]
+}
+
+// historyNeeds is a copy of runnerNeeds while scheduler.history_raise is on,
+// for the views; nil while it is off, so a runner's view stops saying it was
+// raised the moment the setting is.
+func (c *Controller) historyNeeds() map[string]int64 {
+	if c.cfg().Scheduler.HistoryRaise != scheduler.HistoryRaiseOn {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return maps.Clone(c.liveNeedsLocked())
+}
+
+// historyGrant is the memory-valve rule a runner r of p on h is given for its
+// job's history (scheduler.HistoryGrantFor), read from the last pass. The
+// setting is read again here, so turning it off stops every grant at the next
+// heartbeat rather than at the next pass.
+func (c *Controller) historyGrant(p *store.Pool, h *store.Host, r *store.Runner) (scheduler.HistoryGrant, bool) {
+	if r == nil || c.cfg().Scheduler.HistoryRaise != scheduler.HistoryRaiseOn {
+		return scheduler.HistoryGrant{}, false
+	}
+	return scheduler.HistoryGrantFor(p, h, r, c.runnerNeed(r.ID))
 }
 
 // bookingOn is how the last pass booked a host's memory, nil where memory is

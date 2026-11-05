@@ -971,6 +971,10 @@ type RunnerRenderer struct {
 	pools map[string]*store.Pool
 	hosts map[string]*store.Host
 	jobs  map[string]*store.Job
+	// needs is what the last pass found each runner's job needs, for the
+	// memory a runner is raised to for its job's history (see
+	// Controller.runnerNeeds); nil with scheduler.history_raise off.
+	needs map[string]int64
 }
 
 // RunnerRenderer builds the index a page of runners is rendered from.
@@ -983,7 +987,7 @@ func (c *Controller) RunnerRenderer(ctx context.Context, runners []*store.Runner
 	if err != nil {
 		return nil, fmt.Errorf("listing hosts: %w", err)
 	}
-	v := &RunnerRenderer{pools: map[string]*store.Pool{}, hosts: map[string]*store.Host{}, jobs: map[string]*store.Job{}}
+	v := &RunnerRenderer{pools: map[string]*store.Pool{}, hosts: map[string]*store.Host{}, jobs: map[string]*store.Job{}, needs: c.historyNeeds()}
 	for _, p := range pools {
 		v.pools[p.ID] = p
 	}
@@ -1013,14 +1017,17 @@ func (c *Controller) RunnerRenderer(ctx context.Context, runners []*store.Runner
 
 // View renders one runner.
 func (v *RunnerRenderer) View(r *store.Runner) RunnerView {
-	return runnerView(r, v.pools[r.PoolID], v.hosts[r.HostID], v.jobs[r.CurrentJobID])
+	return runnerView(r, v.pools[r.PoolID], v.hosts[r.HostID], v.jobs[r.CurrentJobID], v.needs[r.ID])
 }
 
 // runnerView renders one runner from the rows that name it: its pool, its host
 // and, when it is busy, the job it is executing. It is RunnerRenderer.View
 // for a caller that holds one runner's rows already, which is what a detail
 // route is; the renderer's maps are the same three rows for a whole page.
-func runnerView(r *store.Runner, pool *store.Pool, host *store.Host, job *store.Job) RunnerView {
+//
+// needMB is what the runner's job is known to need where that is above what the
+// runner was created with (scheduler.history_raise), and zero otherwise.
+func runnerView(r *store.Runner, pool *store.Pool, host *store.Host, job *store.Job, needMB int64) RunnerView {
 	poolName, hostName := "", ""
 	if pool != nil {
 		poolName = pool.Name
@@ -1055,7 +1062,7 @@ func runnerView(r *store.Runner, pool *store.Pool, host *store.Host, job *store.
 		AllocatedMemoryMB:     r.AllocatedMemoryMB,
 		AllocationSource:      r.AllocationSource,
 		CPUResource:           cpuResourceView(r, pool, host),
-		MemoryResource:        memoryResourceView(r, pool, host),
+		MemoryResource:        memoryResourceViewFor(r, pool, host, needMB),
 		Scratch:               scratchView(r),
 		CreatedAt:             r.CreatedAt,
 		CreateTaskIssuedAt:    r.CreateTaskIssuedAt,
@@ -1106,7 +1113,7 @@ func (c *Controller) RunnerViewIn(ctx context.Context, run *store.Runner, host *
 		}
 		job = j
 	}
-	return runnerView(run, pool, host, job), nil
+	return runnerView(run, pool, host, job, c.historyNeeds()[run.ID]), nil
 }
 
 func cpuResourceView(r *store.Runner, p *store.Pool, h *store.Host) *CPUResourceView {
@@ -1170,7 +1177,7 @@ func cpuResourceView(r *store.Runner, p *store.Pool, h *store.Host) *CPUResource
 // rather than two list queries, because a reconcile pass publishes one event
 // per runner it touched and the fleet may be large.
 func (c *Controller) runnerView(ctx context.Context, r *store.Runner) RunnerView {
-	v := &RunnerRenderer{pools: map[string]*store.Pool{}, hosts: map[string]*store.Host{}, jobs: map[string]*store.Job{}}
+	v := &RunnerRenderer{pools: map[string]*store.Pool{}, hosts: map[string]*store.Host{}, jobs: map[string]*store.Job{}, needs: c.historyNeeds()}
 	if p, err := c.st.GetPool(ctx, r.PoolID); err == nil {
 		v.pools[p.ID] = p
 	}

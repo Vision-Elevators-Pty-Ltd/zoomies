@@ -126,13 +126,25 @@
   // One landing per navigation and hash. Without the key, the host.doctor frame
   // that swaps the report in every few seconds would scroll the page back each time.
   let landedFor = '';
+  // Each landing scheduled for later takes a number, and lands only if no
+  // landing has happened or been scheduled since. An in-page link fires
+  // popstate (a navigation, so this effect schedules a landing a frame later)
+  // and then hashchange (which lands at once): without the number, the late
+  // landing arrived after the person had already moved on and took focus and
+  // the scroll position back to the row.
+  let landing = 0;
   $effect(() => {
     if (!report) return;
     const key = `${router.navigation}:${location.hash}`;
     if (untrack(() => landedFor) === key) return;
     landedFor = key;
+    const mine = ++landing;
     // After App.svelte has put focus on the page heading, or it would take it back.
-    void tick().then(() => requestAnimationFrame(land));
+    void tick().then(() =>
+      requestAnimationFrame(() => {
+        if (mine === landing) land();
+      }),
+    );
   });
   // What changed while this page was open. The first report seen is the
   // baseline, so opening the page announces nothing. It is read off the derived
@@ -258,7 +270,14 @@
   // A failure the person caused by pressing the button is told to them once,
   // and stays until read. One another operator caused, or one found on opening
   // the page, is only the line: a background event is shown by the page.
+  //
+  // Once per press, not once per way of failing: the same unanswered ask is
+  // reported first by the page's own clock (failureKey asked:) and can then
+  // arrive as the controller's failure (failed:) or, with the ask gone from
+  // the view, as the page's local ceiling (local:). Keyed by the failure, each
+  // of those was a toast of its own; two identical ones were seen on CI.
   let toastedFor = '';
+  let toastedPress: number | null = null;
   $effect(() => {
     const r = check;
     const state = host?.health_check?.state;
@@ -268,8 +287,10 @@
     untrack(() => {
       if (r?.failureKey && r.failureKey !== toastedFor) {
         toastedFor = r.failureKey;
-        if (localAskedAt !== null && host)
+        if (localAskedAt !== null && localAskedAt !== toastedPress && host) {
+          toastedPress = localAskedAt;
           toasts.error(`Check now failed on ${host.name ?? id}`, r.status);
+        }
       }
       if ((state === 'done' || state === 'failed') && !busy) localAskedAt = null;
     });
@@ -298,6 +319,7 @@
   $effect(() => {
     const onHash = () => {
       landedFor = `${untrack(() => router.navigation)}:${location.hash}`;
+      landing += 1; // a landing already scheduled for this link is this one
       land();
     };
     window.addEventListener('hashchange', onHash);
@@ -489,6 +511,7 @@
     restate = false;
     checkLive = '';
     toastedFor = '';
+    toastedPress = null;
     getHost(hostId, controller.signal)
       .then((h) => {
         fetched = h;

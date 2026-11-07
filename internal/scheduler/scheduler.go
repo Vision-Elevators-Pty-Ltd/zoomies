@@ -1666,7 +1666,7 @@ func newHostSetFrom(hosts []*store.Host, pools []*store.Pool, runners map[string
 	// three times over: 73% of Decide on a quiet fleet of a hundred pools in a
 	// profile.
 	hs.startCharges = opts.startCharges
-	totals := totalsByHostCharged(hs.hosts, pools, runners, opts.startCharges)
+	totals := totalsByHostCharged(hs.hosts, pools, runners, opts.startCharges, pct)
 	// What they are booked for in the overcommitted ledger, where it differs
 	// from what they are charged: by history, or across a machine's agents.
 	groups := machineGroups(hs.hosts, opts.machineLabel)
@@ -1725,18 +1725,12 @@ func newHostSetFrom(hosts []*store.Host, pools []*store.Pool, runners map[string
 		if t.warmingDinD > 0 {
 			hs.warmingDinD[h.ID] += t.warmingDinD
 		}
-		pending := t.pending
 		// Starts the sample cannot contain yet are charged what they were
 		// charged when they were placed (Snapshot.StartCharges), which can be
-		// a job's whole need rather than the percentage. One with no record,
-		// where records are kept, is charged its whole size; where none are
-		// kept, the percentage of it, as before the record existed.
-		if pct < 100 && opts.startCharges == nil {
-			pending.MemoryMB = pending.MemoryMB * pct / 100
-			pending.CPUs = pending.CPUs * float64(pct) / 100
-		}
-		pending.MemoryMB += t.pendingCharged.MemoryMB
-		pending.CPUs += t.pendingCharged.CPUs
+		// a job's whole need rather than the percentage; one with no record,
+		// where records are kept, its whole size. Never less than the
+		// percentage of them all, as a pass with no records charges.
+		pending := pendingDebit(t.pending, t.pendingCharged, opts.startCharges != nil, pct)
 		hs.bookedMemory[h.ID] = l.MemoryMB
 		if h.Usage.Fresh(now) {
 			if v := h.Usage.MemoryAvailableMB; v != nil {
@@ -1799,11 +1793,8 @@ func (hs *hostSet) shareMachine(machine string, members []*store.Host, pools []*
 	// One measurement: the lowest any agent sampled, less every start on the
 	// machine that sample cannot contain yet, and, overcommitted, the largest
 	// of the agents' reserves.
-	pending, charged := pendingAgainst(members, pools, runners, sample, hs.startCharges)
-	if pct < 100 && hs.startCharges == nil {
-		pending = pending * pct / 100
-	}
-	pending += charged
+	full, charged := pendingAgainst(members, pools, runners, sample, hs.startCharges, pct)
+	pending := pendingDebit(Reservation{MemoryMB: full}, Reservation{MemoryMB: charged}, hs.startCharges != nil, pct).MemoryMB
 	available := *sample.Usage.MemoryAvailableMB - pending
 	if overcommit {
 		var reserve int64

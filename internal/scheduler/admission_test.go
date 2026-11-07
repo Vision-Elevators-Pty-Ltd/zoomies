@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"fmt"
+	"math/rand/v2"
 	"strings"
 	"testing"
 	"time"
@@ -536,6 +538,130 @@ func TestGrowthIsJudgedAgainstTheMachinesSampleWhenItIsTheOlder(t *testing.T) {
 		// The guard is taken after the measurement's floor at zero.
 		if got := hs.measuredMemory[older.ID]; got != max(48*gb-tc.pending, 0)-want {
 			t.Fatalf("records %d: measurement %d MB, want 48 GB less %d MB pending (floored at zero) and the guard", len(tc.charges), got, tc.pending)
+		}
+	}
+}
+
+// pendingRunner is a runner of p on h still provisioning, created 10 seconds
+// ago: after the host's sample, so the sample cannot contain it.
+func pendingRunner(id string, p *store.Pool, h *store.Host) *store.Runner {
+	r := testRunner(id, p, store.RunnerProvisioning, 0)
+	r.HostID, r.CreatedAt = h.ID, now.Add(-10*time.Second)
+	h.Usage.SampledAt = now.Add(-20 * time.Second)
+	return r
+}
+
+// Final review, major: a start charge recorded at 30% must not outlast a
+// raise of start_charge_percent to 100, which charges a pending start its
+// whole size. One pending 32 GB runner recorded at 9,830 MB, 50 GB free past
+// the reserve: 100% charges it 32 GB and leaves 18 GB, too little for another
+// 32 GB start; kept at its record it left 40.4 GB and admitted one.
+func TestARecordedChargeNeverUndercutsARaisedPercentage(t *testing.T) {
+	p := browserPool()
+	h := nlAgent("ci-nl-01-pr", "", 0)
+	free := h.MemoryReserve() + 51200
+	h.Usage.MemoryAvailableMB = &free
+	r := pendingRunner("run_pending", p, h)
+	charges := map[string]Reservation{r.ID: {CPUs: 2.4, MemoryMB: startCharge(32*gb, 0, 30)}}
+	hs := newHostSetFrom([]*store.Host{h}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: {r}}, now,
+		ledger{overcommitPercent: 300, cpuOvercommitPercent: 400, startChargePercent: 100, startCharges: charges})
+	if got := hs.measuredMemory[h.ID]; got != 51200-32*gb {
+		t.Fatalf("at 100%% the pending runner left %d MB measured free, want %d (its whole 32 GB charged)", got, 51200-32*gb)
+	}
+	if got := hs.place(p, 1); len(got) != 0 {
+		t.Fatal("a second 32 GB start was admitted into 18 GB")
+	}
+}
+
+// Final review, minor: the records are charged no less than the percentage of
+// all the pending runners together, rounded as a pass with no records rounds
+// it. Three pending 32 GB runners at 30% are 29,491 MB together, one more than
+// three records of 9,830 MB; with 39,320 MB free that one MB refuses the next
+// 9,830 MB start.
+func TestRecordedChargesAreNeverRoundedBelowTheShare(t *testing.T) {
+	p := browserPool()
+	h := nlAgent("ci-nl-01-pr", "", 0)
+	free := h.MemoryReserve() + 39320
+	h.Usage.MemoryAvailableMB = &free
+	charges := map[string]Reservation{}
+	var rs []*store.Runner
+	for i := range 3 {
+		r := pendingRunner("run_"+string(rune('a'+i)), p, h)
+		rs = append(rs, r)
+		charges[r.ID] = Reservation{CPUs: 2.4, MemoryMB: startCharge(32*gb, 0, 30)}
+	}
+	hs := newHostSetFrom([]*store.Host{h}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: rs}, now,
+		ledger{overcommitPercent: 300, cpuOvercommitPercent: 400, startChargePercent: 30, startCharges: charges})
+	if got, want := hs.measuredMemory[h.ID], int64(39320-3*32*gb*30/100); got != want {
+		t.Fatalf("three pending runners left %d MB measured free, want %d", got, want)
+	}
+	if got := hs.place(p, 1); len(got) != 0 {
+		t.Fatal("a 9,830 MB start was admitted into 9,829 MB")
+	}
+}
+
+// Under booked admission the records only ever add to what a pass that keeps
+// none charges: for random sets of pending runners on one host and on a
+// machine of two agents, records of any size or none, and any percentage now,
+// the measurement is charged at least as much, CPU included, and no more
+// starts are placed.
+func TestRecordedChargesNeverChargeLessThanNone(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 11))
+	sizes := []int64{2 * gb, 8 * gb, 16 * gb, 24 * gb, 32 * gb}
+	for iter := range 400 {
+		pct := []int{10, 25, 30, 31, 33, 50, 67, 99, 100}[rng.IntN(9)]
+		machine := ""
+		if iter%2 == 1 {
+			machine = "machine"
+		}
+		pools := []*store.Pool{}
+		for i, s := range sizes {
+			p := limited("pool-"+string(rune('a'+i)), 1+float64(rng.IntN(8)), s)
+			p.MaxRunners = 100
+			pools = append(pools, p)
+		}
+		a := nlAgent("agent-a", machine, 0)
+		b := nlAgent("agent-b", machine, 0)
+		fa, fb := a.MemoryReserve()+int64(rng.IntN(56*1024)), b.MemoryReserve()+int64(rng.IntN(56*1024))
+		a.Usage.MemoryAvailableMB, b.Usage.MemoryAvailableMB = &fa, &fb
+		a.Usage.SampledAt, b.Usage.SampledAt = now.Add(-time.Duration(rng.IntN(30))*time.Second), now.Add(-time.Duration(rng.IntN(30))*time.Second)
+		hosts := []*store.Host{a}
+		if machine != "" {
+			hosts = append(hosts, b)
+		}
+		runners := map[string][]*store.Runner{}
+		charges := map[string]Reservation{}
+		for i := range rng.IntN(8) {
+			p := pools[rng.IntN(len(pools))]
+			h := hosts[rng.IntN(len(hosts))]
+			r := testRunner(fmt.Sprintf("r%d", i), p, store.RunnerProvisioning, 0)
+			r.HostID, r.CreatedAt = h.ID, now.Add(-time.Duration(rng.IntN(40))*time.Second)
+			runners[p.ID] = append(runners[p.ID], r)
+			switch rng.IntN(3) {
+			case 0: // no record: placed before a restart
+			case 1: // a record at an older percentage
+				charges[r.ID] = Reservation{CPUs: p.Resources.CPUs * float64(rng.IntN(101)) / 100, MemoryMB: p.Resources.MemoryMB * int64(rng.IntN(101)) / 100}
+			default: // a record of a job's need, up to the whole size
+				charges[r.ID] = Reservation{CPUs: p.Resources.CPUs, MemoryMB: int64(rng.Int64N(p.Resources.MemoryMB + 1))}
+			}
+		}
+		at := func(rec map[string]Reservation) *hostSet {
+			return newHostSetFrom(hosts, pools, runners, now, ledger{overcommitPercent: 300, cpuOvercommitPercent: 400,
+				startChargePercent: pct, machineLabel: "host", startCharges: rec})
+		}
+		none, with := at(nil), at(charges)
+		for _, h := range hosts {
+			if with.measuredMemory[h.ID] > none.measuredMemory[h.ID] {
+				t.Fatalf("iter %d (pct %d): records left %d MB measured free on %s, more than the %d MB without", iter, pct, with.measuredMemory[h.ID], h.Name, none.measuredMemory[h.ID])
+			}
+			if with.observedCPU[h.ID] > none.observedCPU[h.ID]+1e-9 {
+				t.Fatalf("iter %d (pct %d): records left %.3f CPU on %s, more than the %.3f without", iter, pct, with.observedCPU[h.ID], h.Name, none.observedCPU[h.ID])
+			}
+		}
+		for _, p := range pools {
+			if a, b := len(at(charges).place(p, 5)), len(at(nil).place(p, 5)); a > b {
+				t.Fatalf("iter %d (pct %d): with records %d starts of %s were placed, without %d", iter, pct, a, p.Name, b)
+			}
 		}
 	}
 }

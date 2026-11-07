@@ -467,12 +467,13 @@ func bookingTotals(hosts []*store.Host, pools []*store.Pool, runners map[string]
 				sample = s
 			}
 			if pendingOn(sample, r) {
-				if c, ok := charges[r.ID]; ok {
-					using = min(c.MemoryMB, charge)
-				} else if charges == nil {
-					using = charge * pct / 100
+				// What the measurement is charged for it: no more, so
+				// that what growth credits it with is charged somewhere.
+				c, ok := charges[r.ID]
+				if charges == nil {
+					using = pendingShare(Reservation{MemoryMB: charge}, pct).MemoryMB
 				} else {
-					using = charge
+					using = pendingRunnerCharge(Reservation{MemoryMB: charge}, c, ok, pct).MemoryMB
 				}
 			}
 			t.ExpectedGrowthMB += max(peak-using, 0)
@@ -524,9 +525,11 @@ func machineGroups(hosts []*store.Host, label string) map[string][]*store.Host {
 // started since. It is hostTotals.add's pending, asked against one sample for
 // runners on several agents of one machine.
 //
-// The second figure is the start charges recorded for some of them (charges,
-// Snapshot.StartCharges); the first is the whole charge of the rest.
-func pendingAgainst(hs []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, sample *store.Host, charges map[string]Reservation) (int64, int64) {
+// The first figure is their whole charges; the second is each at
+// pendingRunnerCharge: its recorded start charge (charges,
+// Snapshot.StartCharges), never below the start charge's share pct of it
+// now, or its whole charge where none is recorded. pendingDebit combines them.
+func pendingAgainst(hs []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, sample *store.Host, charges map[string]Reservation, pct int64) (int64, int64) {
 	on := make(map[string]*store.Host, len(hs))
 	for _, h := range hs {
 		on[h.ID] = h
@@ -548,11 +551,9 @@ func pendingAgainst(hs []*store.Host, pools []*store.Pool, runners map[string][]
 			if starting || r.CreatedAt.After(sample.Usage.SampledAt) ||
 				(r.ContainerStartedAt != nil && r.ContainerStartedAt.After(sample.Usage.SampledAt)) {
 				full := RunnerCharge(p, h, r).MemoryMB
-				if c, ok := charges[r.ID]; ok {
-					charged += min(c.MemoryMB, full)
-				} else {
-					out += full
-				}
+				out += full
+				c, ok := charges[r.ID]
+				charged += pendingRunnerCharge(Reservation{MemoryMB: full}, c, ok, pct).MemoryMB
 			}
 		}
 	}

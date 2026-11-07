@@ -334,15 +334,59 @@ type hostTotals struct {
 	reserved Reservation
 	// pending is what the host's last sample cannot yet contain, the runners
 	// still starting and those created or started since it was taken, at
-	// their whole charge; pendingCharged is those of them whose start charge
-	// was recorded when they were placed (Snapshot.StartCharges), at it.
+	// their whole charge. pendingCharged is the same runners each at what the
+	// start charges recorded when they were placed (Snapshot.StartCharges)
+	// say, never below the start charge's share of it now: one with a record
+	// at the larger of the two, one without at its whole charge. pendingDebit
+	// turns the two into what the measurement is charged.
 	pending        Reservation
 	pendingCharged Reservation
 }
 
+// pendingShare is a pending total at the start charge's share pct of it: what
+// a pass that keeps no records of start charges charges the runners its
+// sample cannot contain yet.
+func pendingShare(full Reservation, pct int64) Reservation {
+	if pct < 100 {
+		full.MemoryMB = full.MemoryMB * pct / 100
+		full.CPUs = full.CPUs * float64(pct) / 100
+	}
+	return full
+}
+
+// pendingDebit is what the runners a sample cannot contain yet are charged
+// against it: their whole charges at the start charge's share pct where no
+// start charges are recorded (charges is nil), and otherwise the larger of
+// that and what the records say (pendingCharged). The records can only add:
+// a start placed against a job's whole need is charged it, but a percentage
+// raised since, or the rounding of a share taken runner by runner, never
+// charges less than a pass with no records would.
+func pendingDebit(full, charged Reservation, recorded bool, pct int64) Reservation {
+	share := pendingShare(full, pct)
+	if !recorded {
+		return share
+	}
+	return Reservation{CPUs: max(share.CPUs, charged.CPUs), MemoryMB: max(share.MemoryMB, charged.MemoryMB)}
+}
+
+// pendingRunnerCharge is what one pending runner of whole charge full counts
+// for in pendingCharged: its recorded start charge, never more than its whole
+// charge nor less than the start charge's share of it now; its whole charge
+// where nothing is recorded for it.
+func pendingRunnerCharge(full Reservation, rec Reservation, ok bool, pct int64) Reservation {
+	if !ok {
+		return full
+	}
+	share := pendingShare(full, pct)
+	return Reservation{
+		CPUs:     max(min(rec.CPUs, full.CPUs), share.CPUs),
+		MemoryMB: max(min(rec.MemoryMB, full.MemoryMB), share.MemoryMB),
+	}
+}
+
 // add counts one live runner of the pool p, which is on h. charges is
 // Snapshot.StartCharges, nil where no start charge is recorded.
-func (t *hostTotals) add(p *store.Pool, h *store.Host, r *store.Runner, charges map[string]Reservation) {
+func (t *hostTotals) add(p *store.Pool, h *store.Host, r *store.Runner, charges map[string]Reservation, pct int64) {
 	res := RunnerCharge(p, h, r)
 	t.reserved.CPUs += res.CPUs
 	t.reserved.MemoryMB += res.MemoryMB
@@ -361,13 +405,12 @@ func (t *hostTotals) add(p *store.Pool, h *store.Host, r *store.Runner, charges 
 		}
 	}
 	if pendingOn(h, r) {
-		if c, ok := charges[r.ID]; ok {
-			t.pendingCharged.CPUs += min(c.CPUs, res.CPUs)
-			t.pendingCharged.MemoryMB += min(c.MemoryMB, res.MemoryMB)
-		} else {
-			t.pending.CPUs += res.CPUs
-			t.pending.MemoryMB += res.MemoryMB
-		}
+		t.pending.CPUs += res.CPUs
+		t.pending.MemoryMB += res.MemoryMB
+		c, ok := charges[r.ID]
+		each := pendingRunnerCharge(Reservation{CPUs: res.CPUs, MemoryMB: res.MemoryMB}, c, ok, pct)
+		t.pendingCharged.CPUs += each.CPUs
+		t.pendingCharged.MemoryMB += each.MemoryMB
 	}
 }
 
@@ -390,12 +433,14 @@ func pendingOn(h *store.Host, r *store.Runner) bool {
 // are floating point, and their order is part of the answer. Hosts sharing an ID,
 // which a fleet does not have, are given the same totals as the first of them.
 func totalsByHost(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner) []hostTotals {
-	return totalsByHostCharged(hosts, pools, runners, nil)
+	return totalsByHostCharged(hosts, pools, runners, nil, 100)
 }
 
 // totalsByHostCharged is totalsByHost with the start charges recorded for the
 // runners still pending (Snapshot.StartCharges).
-func totalsByHostCharged(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, charges map[string]Reservation) []hostTotals {
+//
+// pct is the start charge percentage, as chargePercent reads it.
+func totalsByHostCharged(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, charges map[string]Reservation, pct int64) []hostTotals {
 	out := make([]hostTotals, len(hosts))
 	index := make(map[string]int, len(hosts))
 	for i, h := range hosts {
@@ -426,7 +471,7 @@ func totalsByHostCharged(hosts []*store.Host, pools []*store.Pool, runners map[s
 				continue
 			}
 			if i, ok := index[r.HostID]; ok {
-				out[i].add(p, hosts[i], r, charges)
+				out[i].add(p, hosts[i], r, charges, pct)
 			}
 		}
 	}

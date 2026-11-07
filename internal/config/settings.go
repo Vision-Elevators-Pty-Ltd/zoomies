@@ -732,7 +732,7 @@ var registry = buildRegistry([]Setting{
 	{
 		Key: "scheduler.memory_admission", Label: "Memory admission", Env: "ZOOMIES_MEMORY_ADMISSION", Kind: KindEnum, Scope: ScopeInstance, Live: true,
 		Choices: []string{"measured", "booked"},
-		Summary: "What decides whether a host has memory for one more runner where memory is overcommitted. Measured admits a start on the host's measured free memory, less its reserve, the starts its last sample cannot contain yet and the most any one runner already there may still grow by (what it is booked for less what it uses); what its runners are booked for only orders the hosts that have room, and whatever booked admission would start is started too. Booked also refuses a start once the runners on the machine are booked for its memory times the overcommit. A runner's limit, the reserve, the pressure holds and the CPU holds are the same either way.",
+		Summary: "What decides whether a host has memory for one more runner where memory is overcommitted. Booked starts one where the booking ceiling has room for it and its start charge is measured free. Measured starts it there too, and also where the booking is full but the measured free memory covers its start charge and the growth guard: what every runner on the machine may still grow by to what its job typically peaks at, plus the most one of them may grow past that to its limit. It never starts fewer runners than booked. A runner's limit, the reserve, the pressure holds and the CPU holds are the same either way.",
 	},
 	{
 		Key: "scheduler.memory_booking_headroom_percent", Label: "Memory booking headroom", Env: "ZOOMIES_MEMORY_BOOKING_HEADROOM_PERCENT", Kind: KindInt, Scope: ScopeInstance, Live: true,

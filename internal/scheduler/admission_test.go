@@ -26,9 +26,17 @@ func usingMB(id string, p *store.Pool, h *store.Host, mb int64) *store.Runner {
 	return r
 }
 
+// idleOn is a runner of p on h with no job yet, using mb, whose sample the
+// host's measurement contains.
+func idleOn(id string, p *store.Pool, h *store.Host, mb int64) *store.Runner {
+	r := usingMB(id, p, h, mb)
+	r.State = store.RunnerIdle
+	return r
+}
+
 // nl02 is ci-nl-02 as it stood at a refusal: two agents, ten image-build
 // runners between them booked at their whole 16 GB (160 GB of the 163.3 GB
-// ceiling) and each using 1.2 GB, with 45 GB measured free.
+// ceiling) and each using 1.2 GB, with 45 GB measured free and no history.
 func nl02(admitByMeasure bool) (*hostSet, *store.Pool, *store.Host, *store.Host) {
 	p := imageBuildPool()
 	pilot := nlAgent("ci-nl-02-pilot", "ci-nl-02", 45*gb)
@@ -46,40 +54,109 @@ func nl02(admitByMeasure bool) (*hostSet, *store.Pool, *store.Host, *store.Host)
 	return hs, p, pilot, trusted
 }
 
-// The worked example: booked, the machine refuses every image build because
-// 160 GB of its 163.3 GB is booked. Measured, it takes what its 45 GB free
-// memory admits past the reserve and the growth guard, and no more.
-func TestMeasuredAdmissionStartsWhatTheMachineHasFree(t *testing.T) {
+// At the 6 Nov refusal, the growth guard holds the start the booking refused:
+// ten runners that may each still grow to 16 GB are 148 GB of growth, against
+// 39 GB measured free. The guard is every runner's growth, not the largest.
+func TestTheGrowthGuardSumsEveryRunnersGrowth(t *testing.T) {
 	booked, p, _, _ := nl02(false)
 	if got := booked.place(p, 20); len(got) != 0 {
-		t.Fatalf("booked admission placed %d image builds with 160 of 163.3 GB booked; vision.8 refused every one", len(got))
+		t.Fatalf("booked admission placed %d image builds with 160 of 163.3 GB booked", len(got))
 	}
 	measured, p, pilot, trusted := nl02(true)
-	// 45 GB free, less the 6 GB reserve and the growth guard: a runner booked
-	// at 16 GB and using 1.2 GB may grow by 14.8 GB. The first start is booked
-	// at 16 GB, which raises the guard by 1.2 GB, and each start is charged
-	// 30% of 16 GB = 4.8 GB: (45 - 6 - 14.8 - 1.2) / 4.8 = 4.79, so 4 starts.
-	growth := 16*gb - 1229
-	if g := measured.growth[pilot.ID]; g != growth || measured.growth[trusted.ID] != growth {
-		t.Fatalf("the growth guard is %d and %d MB, want the machine's %d on both agents", g, measured.growth[trusted.ID], growth)
+	// No history: every runner is expected to reach its 16 GB limit.
+	want := 10 * (16*gb - 1229)
+	if g := measured.guard(pilot.ID); g != want || measured.guard(trusted.ID) != want {
+		t.Fatalf("the growth guard is %d and %d MB, want the machine's %d on both agents", g, measured.guard(trusted.ID), want)
 	}
-	free := 45*gb - pilot.MemoryReserve() - growth
-	want := int((free - (16*gb - growth)) / startCharge(16*gb, 0, 30))
-	got := measured.placeAvoiding(p, 20, nil)
-	if want != 4 || len(got) != want {
-		t.Fatalf("measured admission placed %d image builds, want %d (the example says 4)", len(got), want)
+	if got := measured.place(p, 20); len(got) != 0 {
+		t.Fatalf("measured admission placed %d image builds; the guard is %d MB past 39 GB free", len(got), want)
+	}
+	if hb := measured.bookings[pilot.ID]; hb == nil || hb.Admission != AdmissionMeasured || hb.GrowthReserveMB != want ||
+		hb.ExpectedGrowthMB != want || hb.LimitGrowthMB != 0 {
+		t.Fatalf("the host's booking view is %+v", hb)
+	}
+}
+
+// The guard's two parts, from history: a runner running a known job may grow
+// to its job's ninetieth percentile (no headroom), one with no job yet to its
+// pool's median; and the most any one of them may go on past that to its limit.
+func TestTheGrowthGuardIsEveryJobsUsualPeakAndOneLimit(t *testing.T) {
+	p := browserPool() // 32 GB
+	h := withUsage(sized("ci-big", 14, 24, 256*gb, 500*1024), 12, 120*gb)
+	h.ReserveMemoryMB = 6144
+	visual, draft := usingMB("run_v", p, h, 3*gb), usingMB("run_d", p, h, 4*gb)
+	idle := idleOn("run_i", p, h, 100)
+	history := map[store.JobUsageKey][]store.JobPeak{
+		key("visual-shard (1/3)", p): peaksOf(20, 8*gb),
+		key("draft-affected", p):     peaksOf(20, 22*gb),
+	}
+	in := &BookingInputs{
+		PoolRuns:   map[string][]store.JobPeak{p.ID: peaksOf(100, 2*gb, 4*gb, 6*gb)},
+		RunnerJobs: map[string]store.JobUsageKey{visual.ID: key("visual-shard (1/3)", p), draft.ID: key("draft-affected", p)},
+	}
+	b := newBooker(BookingHistory, 25, in, history, []*store.Pool{p}, nil)
+	hs := newHostSetFrom([]*store.Host{h}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: {visual, draft, idle}}, now,
+		ledger{overcommitPercent: 300, cpuOvercommitPercent: 800, startChargePercent: 30, book: b, admitByMeasure: true})
+	// visual 8 - 3 = 5 GB; draft 22 - 4 = 18 GB; the idle runner, its pool's
+	// median of 4 GB less its 100 MB.
+	expected := (8*gb - 3*gb) + (22*gb - 4*gb) + (4*gb - 100)
+	// Past that to the 32 GB limit: the idle runner has 28 GB to go.
+	limit := 32*gb - 4*gb
+	if hs.growthSum[h.ID] != expected || hs.growthMax[h.ID] != limit {
+		t.Fatalf("growth guard %d + %d MB, want %d + %d", hs.growthSum[h.ID], hs.growthMax[h.ID], expected, limit)
+	}
+	// A start adds its own: from its 9.6 GB charge to its pool's 4 GB median
+	// is nothing, and past the charge to 32 GB is 22.4 GB, below the largest.
+	before := hs.measuredMemory[h.ID]
+	if got := hs.place(p, 1); len(got) != 1 {
+		t.Fatalf("no start with %d MB past the guard", before)
+	}
+	if hs.growthMax[h.ID] != limit || hs.growthSum[h.ID] != expected {
+		t.Fatalf("after a start the guard is %d + %d MB", hs.growthSum[h.ID], hs.growthMax[h.ID])
+	}
+	if spent := before - hs.measuredMemory[h.ID]; spent != startCharge(32*gb, 0, 30) {
+		t.Fatalf("a start took %d MB from the measurement, want only its charge", spent)
+	}
+}
+
+// A large machine whose idle runners are booked for the heaviest job waiting:
+// the booking is full, but what they typically use is small, so measured
+// admission starts what the measurement less the guard allows.
+func TestMeasuredAdmissionStartsWhereTheGuardFits(t *testing.T) {
+	p := browserPool()
+	h := withUsage(sized("p01-ci-01-pr", 40, 32, 225478, 500*1024), 20, 200*gb)
+	h.ReserveMemoryMB = 8192
+	var runners []*store.Runner
+	for i := range 20 {
+		runners = append(runners, idleOn("idle_"+string(rune('a'+i)), p, h, 100))
+	}
+	history := map[store.JobUsageKey][]store.JobPeak{key("draft-affected", p): peaksOf(20, 26*gb)}
+	in := &BookingInputs{PoolRuns: map[string][]store.JobPeak{p.ID: peaksOf(100, 2*gb)}}
+	waiting := &store.Job{Repo: "Vision-Elevators-Pty-Ltd/ops_app", Workflow: "PR", JobName: "draft-affected", State: store.JobQueued}
+	b := newBooker(BookingHistory, 25, in, history, []*store.Pool{p}, map[string][]*store.Job{p.ID: {waiting}})
+	at := func(measure bool) *hostSet {
+		return newHostSetFrom([]*store.Host{h}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: runners}, now,
+			ledger{overcommitPercent: 300, cpuOvercommitPercent: 800, startChargePercent: 30, book: b, admitByMeasure: measure})
+	}
+	booked := at(false)
+	if left := booked.bookedMemory[h.ID]; left >= 32*gb {
+		t.Fatalf("20 idle runners booked for draft-affected should fill the ceiling; %d MB left", left)
+	}
+	if got := booked.place(p, 5); len(got) != 0 {
+		t.Fatalf("booked admission placed %d", len(got))
+	}
+	measured := at(true)
+	got := measured.placeAvoiding(p, 5, nil)
+	if len(got) == 0 {
+		t.Fatal("measured admission placed nothing on 192 GB free with a 68 GB guard")
 	}
 	for _, pl := range got {
 		if pl.size != nil {
-			t.Fatalf("a runner was created at %+v; its limit must stay the pool's 16 GB", *pl.size)
+			t.Fatalf("a runner was created at %+v; its limit must stay 32 GB", *pl.size)
 		}
 	}
-	// The booking was still taken from, for the Hosts page and the score.
-	if left := measured.bookedMemory[pilot.ID]; left != BookingMemoryMB(pilot, 300)-160*gb-int64(want)*16*gb {
-		t.Fatalf("the booking has %d MB left after %d starts", left, want)
-	}
-	if hb := measured.bookings[pilot.ID]; hb == nil || hb.Admission != AdmissionMeasured || hb.GrowthReserveMB != growth {
-		t.Fatalf("the host's booking view is %+v", hb)
+	if m := measured.measuredMemory[h.ID]; m < 0 {
+		t.Fatalf("placing left the guard unfunded by %d MB", -m)
 	}
 }
 
@@ -112,46 +189,57 @@ func TestMeasuredAdmissionKeepsTheMeasuredCheckAndTheReserve(t *testing.T) {
 	}
 }
 
-// Where the booking is full, a start needs the reserve, the growth guard and
-// its charge measured free: one MB short refuses it, exactly enough takes one.
+// Where the booking is full, a start needs the reserve, its charge and the
+// whole guard, its own growth included, measured free: one MB short refuses
+// it, exactly enough takes one, and the reason names the guard.
 func TestMeasuredAdmissionPastAFullBookingHoldsTheGrowthGuard(t *testing.T) {
 	p := imageBuildPool()
-	h := nlAgent("ci-nl-02-pilot", "", 0)
+	h := withUsage(sized("ci-big", 20, 64, 256*gb, 500*1024), 10, 0)
+	h.ReserveMemoryMB = 4 * gb
 	var rs []*store.Runner
-	for i := range 10 { // 160 GB booked of the 163.3 GB ceiling
-		rs = append(rs, usingMB("run_"+string(rune('a'+i)), p, h, 2*gb))
+	jobs := map[string]store.JobUsageKey{}
+	for i := range 10 { // each runs a job whose p90 is 15 GB, and uses 2 GB
+		r := usingMB("run_"+string(rune('a'+i)), p, h, 2*gb)
+		rs = append(rs, r)
+		jobs[r.ID] = key("deployability-compose (web)", p)
 	}
-	runners := map[string][]*store.Runner{p.ID: rs}
+	history := map[store.JobUsageKey][]store.JobPeak{key("deployability-compose (web)", p): peaksOf(20, 15*gb)}
+	in := &BookingInputs{PoolRuns: map[string][]store.JobPeak{p.ID: peaksOf(100, 4*gb)}, RunnerJobs: jobs}
+	b := newBooker(BookingHistory, 25, in, history, []*store.Pool{p}, nil)
 	at := func(freeMB int64) *hostSet {
 		h.Usage.MemoryAvailableMB = &freeMB
-		return newHostSetFrom([]*store.Host{h}, []*store.Pool{p}, runners, now,
-			ledger{overcommitPercent: 300, cpuOvercommitPercent: 400, startChargePercent: 30, admitByMeasure: true})
+		hs := newHostSetFrom([]*store.Host{h}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: rs}, now,
+			ledger{overcommitPercent: 300, cpuOvercommitPercent: 800, startChargePercent: 30, book: b, admitByMeasure: true})
+		hs.bookedMemory[h.ID] = 0 // the booking full, as if the rest were booked: only the measured rule can admit
+		hs.syncMemory(h.ID)
+		return hs
 	}
-	// The runners there may grow by 14 GB each, but a start booked at its
-	// whole 16 GB (no history) may grow by 16: the guard it must leave is 16 GB.
-	short := h.MemoryReserve() + 16*gb + startCharge(16*gb, 0, 30) - 1
+	// The runners may still grow from 2 GB to 15 GB each: 130 GB; one of them
+	// 1 GB more to its limit. A start is charged 4.8 GB and typically uses its
+	// pool's 4 GB median, below its charge; past its charge to 16 GB is 11.2 GB,
+	// the largest growth to a limit now.
+	charge := startCharge(16*gb, 0, 30)
+	guard := 10*(15*gb-2*gb) + (16*gb - charge)
+	short := h.MemoryReserve() + charge + guard - 1
 	hs := at(short)
-	if hs.growth[h.ID] != 14*gb {
-		t.Fatalf("growth guard %d MB, want 14 GB", hs.growth[h.ID])
-	}
 	if got := hs.place(p, 20); len(got) != 0 {
-		t.Fatalf("placed %d one MB short of the reserve, the growth guard and a start charge", len(got))
+		t.Fatalf("placed %d one MB short of the reserve, the charge and the guard", len(got))
 	}
-	if d := hs.shortOfMemory(h, p); !strings.Contains(d, "may still grow by") || !strings.Contains(d, "nor has its booking room") {
+	if d := hs.shortOfMemory(h, p); !strings.Contains(d, "growth guard") || !strings.Contains(d, "nor has its booking room") {
 		t.Fatalf("short of memory says %q, want the growth guard and the booking named", d)
 	}
 	if got := at(short+1).place(p, 20); len(got) != 1 {
-		t.Fatalf("placed %d with exactly the reserve, the guard and one charge free, want 1", len(got))
+		t.Fatalf("placed %d with exactly the reserve, the charge and the guard free, want 1", len(got))
 	}
 }
 
 // Measured admission never refuses what booked admission takes: on a quiet
-// machine whose booking has room, a heavy idle runner's guard does not cost a
-// start the measurement alone allowed before.
+// machine whose booking has room, a guard the measurement cannot cover does not
+// cost a start the booking and the measurement allowed before.
 func TestMeasuredAdmissionNeverAdmitsLessThanBooked(t *testing.T) {
 	p := browserPool()
 	h := nlAgent("ci-nl-01-pr", "", 47*gb)
-	idle := usingMB("run_idle", p, h, 200) // booked whole (no history): a 32 GB guard
+	idle := idleOn("run_idle", p, h, 200) // no history: a 32 GB guard
 	runners := map[string][]*store.Runner{p.ID: {idle}}
 	count := func(measure bool) int {
 		hs := newHostSetFrom([]*store.Host{h}, []*store.Pool{p}, runners, now,
@@ -161,44 +249,6 @@ func TestMeasuredAdmissionNeverAdmitsLessThanBooked(t *testing.T) {
 	booked, measured := count(false), count(true)
 	if booked == 0 || measured != booked {
 		t.Fatalf("booked admission placed %d and measured %d; measured must take at least what booked does", booked, measured)
-	}
-}
-
-// The guard is the largest growth still to come, not the sum: runners rarely
-// peak together, and summing every peak is the booking this replaces. A start
-// booked for more than the guard raises it, on every agent of the machine.
-func TestTheGrowthGuardIsTheHeaviestRunnerAndRisesWithAStart(t *testing.T) {
-	p := browserPool()
-	pr := nlAgent("ci-nl-01-pr", "ci-nl-01", 49*gb)
-	tr := nlAgent("ci-nl-01-trusted", "ci-nl-01", 49*gb)
-	visual, draft := usingMB("run_v", p, pr, 3*gb), usingMB("run_d", p, tr, 4*gb)
-	history := map[store.JobUsageKey][]store.JobPeak{
-		key("visual-shard (1/3)", p): peaksOf(20, 8*gb),
-		key("draft-affected", p):     peaksOf(20, 22*gb),
-	}
-	in := &BookingInputs{
-		PoolRuns:   map[string][]store.JobPeak{p.ID: peaksOf(100, 4*gb)},
-		RunnerJobs: map[string]store.JobUsageKey{visual.ID: key("visual-shard (1/3)", p), draft.ID: key("draft-affected", p)},
-	}
-	b := newBooker(BookingHistory, 25, in, history, []*store.Pool{p}, nil)
-	hs := newHostSetFrom([]*store.Host{pr, tr}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: {visual, draft}}, now,
-		ledger{overcommitPercent: 300, startChargePercent: 30, machineLabel: "host", book: b, admitByMeasure: true})
-	// draft-affected books 22 GB x 1.25 = 27.5 GB and uses 4 GB: 23.5 GB to come.
-	if want := int64(28160 - 4*gb); hs.growth[pr.ID] != want || hs.growth[tr.ID] != want {
-		t.Fatalf("growth guard %d / %d MB, want draft-affected's %d on both agents", hs.growth[pr.ID], hs.growth[tr.ID], want)
-	}
-	before := hs.measuredMemory[pr.ID]
-	// A start books the pool's 5 GB, below the guard: only its charge is taken.
-	if got := hs.place(p, 1); len(got) != 1 {
-		t.Fatal("no start on a machine with room")
-	}
-	if spent := before - hs.measuredMemory[tr.ID]; spent != startCharge(32*gb, 0, 30) {
-		t.Fatalf("a start below the guard took %d MB from the sibling's measurement, want its charge", spent)
-	}
-	// A start booked above the guard raises it by the difference on both.
-	hs.raiseGrowth(pr, 30*gb)
-	if hs.growth[pr.ID] != 30*gb || hs.growth[tr.ID] != 30*gb {
-		t.Fatalf("raising the guard left %d / %d MB", hs.growth[pr.ID], hs.growth[tr.ID])
 	}
 }
 
@@ -227,7 +277,7 @@ func TestMeasuredAdmissionChangesNothingWithoutOvercommit(t *testing.T) {
 	runners := map[string][]*store.Runner{p.ID: {usingMB("run_a", p, h, 1229), usingMB("run_b", p, h, 1229)}}
 	off := newHostSetFrom([]*store.Host{h}, []*store.Pool{p}, runners, now, ledger{overcommitPercent: 100, startChargePercent: 30})
 	on := newHostSetFrom([]*store.Host{h}, []*store.Pool{p}, runners, now, ledger{overcommitPercent: 100, startChargePercent: 30, admitByMeasure: true})
-	if on.byMeasure || on.growth != nil {
+	if on.byMeasure || on.growthSum != nil {
 		t.Fatal("measured admission is on at 100% overcommit")
 	}
 	if a, b := len(off.place(p, 20)), len(on.place(p, 20)); a != b {
@@ -235,49 +285,157 @@ func TestMeasuredAdmissionChangesNothingWithoutOvercommit(t *testing.T) {
 	}
 }
 
+// Finding 1 of the vision.9 review: a start charged a job's whole need when it
+// was placed is charged that again by the passes after, until a host sample
+// contains it. Charged only the percentage, the next pass on the same sample
+// admitted a second 16 GB start into room for one.
+func TestAPendingStartKeepsItsChargeAcrossPasses(t *testing.T) {
+	p := imageBuildPool()
+	h := nlAgent("ci-nl-02-pilot", "", 0)
+	free := h.MemoryReserve() + 20*gb
+	h.Usage.MemoryAvailableMB = &free
+	need := &Requirement{MemoryMB: 16 * gb}
+	pass := func(runners []*store.Runner, charges map[string]Reservation) (*hostSet, []placement) {
+		hs := newHostSetFrom([]*store.Host{h}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: runners}, now,
+			ledger{overcommitPercent: 300, cpuOvercommitPercent: 400, startChargePercent: 30, startCharges: charges})
+		hs.need = need
+		return hs, hs.placeAvoiding(p, 1, nil)
+	}
+	_, first := pass(nil, map[string]Reservation{})
+	if len(first) != 1 || first[0].charge.MemoryMB != 16*gb {
+		t.Fatalf("the first pass placed %+v; want one start charged the job's 16 GB", first)
+	}
+	// The runner it made: provisioning, created after the host's last sample.
+	r := testRunner("run_new", p, store.RunnerProvisioning, 0)
+	r.HostID = h.ID
+	r.CreatedAt = now.Add(time.Second)
+	runners := []*store.Runner{r}
+	charges := map[string]Reservation{r.ID: first[0].charge}
+	for i := range 3 { // three passes, no new heartbeat
+		hs, again := pass(runners, charges)
+		if len(again) != 0 {
+			t.Fatalf("pass %d placed a second 16 GB start into 20 GB free with one 16 GB start pending", i+2)
+		}
+		if want := 20*gb - 16*gb; hs.measuredMemory[h.ID] != want {
+			t.Fatalf("pass %d measured %d MB free, want %d (the pending start's 16 GB charge held)", i+2, hs.measuredMemory[h.ID], want)
+		}
+	}
+	// With records kept, a pending runner with none is charged its whole size;
+	// with none kept (nil), the percentage, as before.
+	if hs, _ := pass(runners, map[string]Reservation{}); hs.measuredMemory[h.ID] != 20*gb-16*gb {
+		t.Fatalf("an unrecorded pending runner was charged %d MB, want its whole 16 GB", 20*gb-hs.measuredMemory[h.ID])
+	}
+	if hs, _ := pass(runners, nil); hs.measuredMemory[h.ID] != 20*gb-startCharge(16*gb, 0, 30) {
+		t.Fatalf("without records a pending runner was charged %d MB, want the 30%%", 20*gb-hs.measuredMemory[h.ID])
+	}
+}
+
+// The same on a machine of two agents: the charge of a start pending on one
+// is held against the machine's one measurement on both.
+func TestAPendingStartsChargeIsTheMachines(t *testing.T) {
+	p := imageBuildPool()
+	pilot := nlAgent("ci-nl-02-pilot", "ci-nl-02", 0)
+	trusted := nlAgent("ci-nl-02-trusted", "ci-nl-02", 0)
+	free := pilot.MemoryReserve() + 20*gb
+	pilot.Usage.MemoryAvailableMB, trusted.Usage.MemoryAvailableMB = &free, &free
+	r := testRunner("run_new", p, store.RunnerProvisioning, 0)
+	r.HostID, r.CreatedAt = pilot.ID, now.Add(time.Second)
+	hs := newHostSetFrom([]*store.Host{pilot, trusted}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: {r}}, now,
+		ledger{overcommitPercent: 300, startChargePercent: 30, machineLabel: "host", startCharges: map[string]Reservation{r.ID: {MemoryMB: 16 * gb}}})
+	if hs.measuredMemory[pilot.ID] != 4*gb || hs.measuredMemory[trusted.ID] != 4*gb {
+		t.Fatalf("the machine measured %d / %d MB free, want 4 GB on both agents", hs.measuredMemory[pilot.ID], hs.measuredMemory[trusted.ID])
+	}
+}
+
+// Finding 2 of the vision.9 review: a reduced runner is admitted at its
+// reduced size, not on room worked out for the standard one. The reviewer's
+// case: ten 16 GB runners using 2 GB each, 16 GB free past the reserve, a 30%
+// charge and an 8 GB minimum. Booked admission refuses; measured created an
+// 11.2 GB runner and left the guard 1.4 GB unfunded.
+func TestAReducedStartIsAdmittedAtItsOwnSize(t *testing.T) {
+	p := imageBuildPool()
+	p.Resources.MinMemoryMB = 8 * gb
+	h := nlAgent("ci-nl-02-pilot", "", 0)
+	free := h.MemoryReserve() + 16*gb
+	h.Usage.MemoryAvailableMB = &free
+	var rs []*store.Runner
+	for i := range 10 {
+		rs = append(rs, usingMB("run_"+string(rune('a'+i)), p, h, 2*gb))
+	}
+	for _, measure := range []bool{false, true} {
+		hs := newHostSetFrom([]*store.Host{h}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: rs}, now,
+			ledger{overcommitPercent: 300, cpuOvercommitPercent: 400, startChargePercent: 30, admitByMeasure: measure})
+		if got := hs.placeAvoiding(p, 5, nil); len(got) != 0 {
+			t.Fatalf("measure=%v placed %d (first size %+v); the guard and the booking both refuse", measure, len(got), got[0].size)
+		}
+	}
+	// Where a reduced runner is admissible, it is the largest admissible size,
+	// and placing it leaves the measurement covering its charge. On an empty
+	// machine with 3 GB measured free, a 32 GB pool with an 8 GB minimum fits
+	// 10 GB (30% of 10 GB is 3 GB), not the 25 GB that the room worked out for
+	// a 32 GB start (3 GB + 70% of 32 GB) suggested.
+	big := browserPool()
+	big.Resources.MinMemoryMB = 8 * gb
+	free = h.MemoryReserve() + 3*gb
+	hs := newHostSetFrom([]*store.Host{h}, []*store.Pool{big}, nil, now,
+		ledger{overcommitPercent: 300, cpuOvercommitPercent: 400, startChargePercent: 30})
+	got := hs.placeAvoiding(big, 1, nil)
+	if len(got) != 1 || got[0].size == nil {
+		t.Fatalf("placed %+v; want one reduced runner", got)
+	}
+	// The largest size whose charge, 30% rounded down, is within 3,072 MB.
+	if mb := got[0].size.MemoryMB; mb != 10243 {
+		t.Fatalf("a reduced runner of %d MB, want 10,243 MB, the largest whose 30%% charge fits 3 GB", mb)
+	}
+	if hs.measuredMemory[h.ID] < 0 {
+		t.Fatalf("placing the reduced runner left the measurement %d MB short", -hs.measuredMemory[h.ID])
+	}
+}
+
 // The kill switch: scheduler.memory_admission=booked, through Decide, is the
-// vision.8 plan; measured creates where the machine has memory free.
+// vision.8 plan; measured creates where the measurement less the guard allows.
 func TestMemoryAdmissionIsAKillSwitchThroughThePolicy(t *testing.T) {
 	plan := func(mode string) Plan {
-		p := imageBuildPool()
-		p.Labels = store.StringSlice{"self-hosted", "zoomies-image-build"}
+		p := browserPool()
+		p.Labels = store.StringSlice{"self-hosted", "zoomies-pr-browser"}
 		p.HostSelector = store.StringMap{}
-		pilot := nlAgent("ci-nl-02-pilot", "ci-nl-02", 45*gb)
-		trusted := nlAgent("ci-nl-02-trusted", "ci-nl-02", 45*gb)
-		trusted.Labels["pool"] = "trusted"
+		p.MaxRunners = 40
+		h := withUsage(sized("p01-ci-01-pr", 40, 32, 225478, 500*1024), 20, 200*gb)
+		h.ReserveMemoryMB = 8192
 		var runners []*store.Runner
-		var jobs []*store.Job
-		for i := range 10 {
-			h := pilot
-			if i%2 == 1 {
-				h = trusted
-			}
-			r := usingMB("run_"+string(rune('a'+i)), p, h, 1229)
+		for i := range 20 {
+			r := idleOn("idle_"+string(rune('a'+i)), p, h, 100)
 			r.PoolID = p.ID
 			runners = append(runners, r)
 		}
-		for i := range 6 {
-			j := queued("job_"+string(rune('a'+i)), time.Minute, "self-hosted", "zoomies-image-build")
+		var jobs []*store.Job
+		for i := range 25 {
+			j := queued("job_"+string(rune('a'+i)), time.Minute, "self-hosted", "zoomies-pr-browser")
+			j.Repo, j.Workflow, j.JobName = "Vision-Elevators-Pty-Ltd/ops_app", "PR", "draft-affected"
 			jobs = append(jobs, j)
 		}
-		s := snap([]*store.Pool{p}, runners, jobs, []*store.Host{pilot, trusted})
-		s.Policy.MemoryOvercommitPercent, s.Policy.CPUOvercommitPercent, s.Policy.StartChargePercent = 300, 400, 30
-		s.Policy.MemoryBooking, s.Policy.MemoryBookingHeadroomPercent, s.Policy.MachineLabel = BookingHistory, 25, "host"
+		s := snap([]*store.Pool{p}, runners, jobs, []*store.Host{h})
+		s.Policy.MemoryOvercommitPercent, s.Policy.CPUOvercommitPercent, s.Policy.StartChargePercent = 300, 800, 30
+		s.Policy.MemoryBooking, s.Policy.MemoryBookingHeadroomPercent = BookingHistory, 25
 		s.Policy.MemoryAdmission = mode
-		s.Booking = &BookingInputs{}
+		s.JobHistory = map[store.JobUsageKey][]store.JobPeak{key("draft-affected", p): peaksOf(20, 26*gb)}
+		s.Booking = &BookingInputs{PoolRuns: map[string][]store.JobPeak{p.ID: peaksOf(100, 2*gb)}}
+		s.StartCharges = map[string]Reservation{}
 		return Decide(s)
 	}
 	if got := actionsOf(plan(AdmissionBooked).Actions, ActionCreate); len(got) != 0 {
-		t.Fatalf("booked admission created %d runners on a machine booked 160 of 163.3 GB", len(got))
+		t.Fatalf("booked admission created %d runners with 20 idle runners booked for draft-affected", len(got))
 	}
 	if got := actionsOf(plan("").Actions, ActionCreate); len(got) != 0 {
 		t.Fatalf("an unset admission created %d runners; the zero value must be booked", len(got))
 	}
 	got := actionsOf(plan(AdmissionMeasured).Actions, ActionCreate)
 	if len(got) == 0 {
-		t.Fatal("measured admission created nothing on a machine with 45 GB free")
+		t.Fatal("measured admission created nothing on 192 GB free")
 	}
-	if len(got) > 4 {
-		t.Fatalf("measured admission created %d runners; the measurement admits 4", len(got))
+	for _, a := range got {
+		if a.StartCharge.MemoryMB != startCharge(32*gb, 0, 30) {
+			t.Fatalf("a create carries a start charge of %d MB, want the 30%% it was charged", a.StartCharge.MemoryMB)
+		}
 	}
 }

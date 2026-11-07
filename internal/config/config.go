@@ -942,12 +942,12 @@ type Scheduler struct {
 	MemoryBookingHeadroomPercent int    `yaml:"memory_booking_headroom_percent"`
 	// MemoryAdmission is measured or booked: what decides whether an
 	// overcommitted host with a fresh sample has memory for one more runner.
-	// Measured admits it on the host's measured free memory, less the
-	// reserve, the starts the sample cannot contain yet and the most any one
-	// runner already there may still grow by; the booking only orders hosts.
-	// It also admits whatever booked would, so it never admits fewer.
-	// Booked also holds it to the booking ceiling, as before the setting
-	// existed. Either way the runner's limit, the reserve, the pressure holds
+	// Booked admits it where the booking ceiling has room and its start
+	// charge is measured free, as before the setting existed. Measured admits
+	// it there too, and also where the measured free memory, less the
+	// reserve, the starts the sample cannot contain yet and the growth guard
+	// (every runner growing to what its job typically peaks at, and one of
+	// them on to its limit), covers its charge; so it never admits fewer. Either way the runner's limit, the reserve, the pressure holds
 	// and the CPU holds are unchanged.
 	MemoryAdmission string `yaml:"memory_admission"`
 	// MachineLabel names the host label whose value says which machine an agent

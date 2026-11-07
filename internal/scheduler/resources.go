@@ -333,12 +333,16 @@ type hostTotals struct {
 	// reserved is what they have been promised: the figure Reserved gives.
 	reserved Reservation
 	// pending is what the host's last sample cannot yet contain, the runners
-	// still starting and those created or started since it was taken.
-	pending Reservation
+	// still starting and those created or started since it was taken, at
+	// their whole charge; pendingCharged is those of them whose start charge
+	// was recorded when they were placed (Snapshot.StartCharges), at it.
+	pending        Reservation
+	pendingCharged Reservation
 }
 
-// add counts one live runner of the pool p, which is on h.
-func (t *hostTotals) add(p *store.Pool, h *store.Host, r *store.Runner) {
+// add counts one live runner of the pool p, which is on h. charges is
+// Snapshot.StartCharges, nil where no start charge is recorded.
+func (t *hostTotals) add(p *store.Pool, h *store.Host, r *store.Runner, charges map[string]Reservation) {
 	res := RunnerCharge(p, h, r)
 	t.reserved.CPUs += res.CPUs
 	t.reserved.MemoryMB += res.MemoryMB
@@ -356,11 +360,23 @@ func (t *hostTotals) add(p *store.Pool, h *store.Host, r *store.Runner) {
 			t.warmingDinD++
 		}
 	}
-	if starting || r.CreatedAt.After(h.Usage.SampledAt) ||
-		(r.ContainerStartedAt != nil && r.ContainerStartedAt.After(h.Usage.SampledAt)) {
-		t.pending.CPUs += res.CPUs
-		t.pending.MemoryMB += res.MemoryMB
+	if pendingOn(h, r) {
+		if c, ok := charges[r.ID]; ok {
+			t.pendingCharged.CPUs += min(c.CPUs, res.CPUs)
+			t.pendingCharged.MemoryMB += min(c.MemoryMB, res.MemoryMB)
+		} else {
+			t.pending.CPUs += res.CPUs
+			t.pending.MemoryMB += res.MemoryMB
+		}
 	}
+}
+
+// pendingOn reports whether h's last sample cannot yet contain r: it is still
+// starting, or was created or started since the sample was taken.
+func pendingOn(h *store.Host, r *store.Runner) bool {
+	starting := r.State == store.RunnerProvisioning || r.State == store.RunnerRegistering
+	return starting || r.CreatedAt.After(h.Usage.SampledAt) ||
+		(r.ContainerStartedAt != nil && r.ContainerStartedAt.After(h.Usage.SampledAt))
 }
 
 // totalsByHost adds up the fleet's live runners by the host each is on, in one pass
@@ -374,6 +390,12 @@ func (t *hostTotals) add(p *store.Pool, h *store.Host, r *store.Runner) {
 // are floating point, and their order is part of the answer. Hosts sharing an ID,
 // which a fleet does not have, are given the same totals as the first of them.
 func totalsByHost(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner) []hostTotals {
+	return totalsByHostCharged(hosts, pools, runners, nil)
+}
+
+// totalsByHostCharged is totalsByHost with the start charges recorded for the
+// runners still pending (Snapshot.StartCharges).
+func totalsByHostCharged(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, charges map[string]Reservation) []hostTotals {
 	out := make([]hostTotals, len(hosts))
 	index := make(map[string]int, len(hosts))
 	for i, h := range hosts {
@@ -404,7 +426,7 @@ func totalsByHost(hosts []*store.Host, pools []*store.Pool, runners map[string][
 				continue
 			}
 			if i, ok := index[r.HostID]; ok {
-				out[i].add(p, hosts[i], r)
+				out[i].add(p, hosts[i], r, charges)
 			}
 		}
 	}

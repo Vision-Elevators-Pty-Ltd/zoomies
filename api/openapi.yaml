@@ -15604,9 +15604,20 @@ components:
           type: integer
           format: int64
           description: >-
-            The growth guard: the most any one live runner on this host's machine may still grow
-            by, what it is booked for less what it was last measured using. Held back from the
-            measured free memory under measured admission.
+            The growth guard, `expected_growth_mb` plus `limit_growth_mb`, held back from the
+            machine's measured free memory under measured admission.
+        expected_growth_mb:
+          type: integer
+          format: int64
+          description: >-
+            What every live runner on this host's machine may still grow by, from what it was last
+            measured using (a runner the host's sample cannot contain yet: its start charge) to what
+            its job typically peaks at: the ninetieth percentile of the job's recent peaks, or before
+            GitHub hands it a job, the median of its pool's; its limit where neither is known.
+        limit_growth_mb:
+          type: integer
+          format: int64
+          description: The most any one of those runners may grow past that to its limit.
     JoinToken:
       type: object
       properties:

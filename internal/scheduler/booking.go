@@ -33,17 +33,23 @@ var BookingModes = []string{BookingHistory, BookingTyped}
 const (
 	// AdmissionMeasured admits a start on the machine's measured free memory:
 	// its sampled available memory, less the starts that sample cannot contain
-	// yet, the reserve and the largest growth still to come of any one runner
-	// on it (the growth guard, HostBooking.GrowthReserveMB), must cover the
-	// start's charge. What the runners are booked for no longer refuses a
-	// start: it orders the hosts that have room. A start the booked rule
-	// below admits is admitted too, so measured admission never takes fewer
-	// starts than booked admission did.
+	// yet, the reserve and the growth guard (HostBooking.GrowthReserveMB), must
+	// cover the start's charge. The guard is what every runner on the machine,
+	// the start included, may still grow by to what its job typically uses
+	// (the ninetieth percentile of the job's peaks; before a job is known, the
+	// median of its pool's), plus the most any one of them may grow past that
+	// to its limit: every job reaching its usual peak at once, and one of them
+	// going all the way. A start the booked rule below admits is admitted
+	// too, so measured admission never takes fewer starts than booked did.
 	//
-	// The booking sums each runner's ninetieth-percentile peak, and runners
-	// rarely peak together: on 6 November ci-nl-02 refused 138 starts with
-	// 140-163 GB of its 163 GB ceiling booked while its 62 GB of memory had
-	// 9-25 GB in use, at about half its CPU.
+	// The guard is deliberately the sum, not the largest single growth: on
+	// 4 November 2026 bursts of starts on ci-nl-02 and ci-nl-01, each admitted
+	// on the measurement, grew together into the machines' memory and the
+	// kernel killed draft-affected runs below their limits. Replayed against
+	// that day, the summed guard refuses those bursts, where the largest
+	// single growth admitted 3-21 starts before each kill; against 6 November
+	// it admits none of the starts the booking refused. It adds starts only
+	// where runners are booked far above what their jobs typically use.
 	AdmissionMeasured = "measured"
 	// AdmissionBooked also holds every start to the booking ceiling: the
 	// machine's allocatable memory times the overcommit, against what every
@@ -147,6 +153,76 @@ type booker struct {
 	// its size, and that the memory valve will let grow into it, is booked at
 	// what it may grow to.
 	raise bool
+	// typical is, by pool ID, the median of the pool's recent measured runs:
+	// what a runner of it with no job yet is expected to use under measured
+	// admission's growth guard. A pool missing from it expects the size.
+	typical map[string]int64
+}
+
+// expectedPeak is what the runs of one job, or of one pool, say a run peaks
+// at: the q-th percentile of their peaks, a run killed for memory counting at
+// the limit it hit, with no headroom. ok is false below BookingMinSamples runs.
+func expectedPeak(peaks []store.JobPeak, q float64) (int64, bool) {
+	var mem []int64
+	for _, p := range peaks {
+		m := p.MemoryMB
+		if p.OOMKilled {
+			m = max(m, p.GrantedMemoryMB)
+		}
+		if m > 0 {
+			mem = append(mem, m)
+		}
+	}
+	if len(mem) < BookingMinSamples {
+		return 0, false
+	}
+	slices.Sort(mem)
+	i := int(math.Ceil(q*float64(len(mem)))) - 1
+	return mem[min(max(i, 0), len(mem)-1)], true
+}
+
+// expected is what live runner r of p on h is expected to peak at, for
+// measured admission's growth guard, and its limit: its job's ninetieth
+// percentile once GitHub has said which job it took, its pool's median before,
+// its limit where neither is known. Never above the limit, which is its whole
+// charge, or what history_raise lets it grow to where that is more.
+func (b *booker) expected(p *store.Pool, h *store.Host, r *store.Runner) (peak, limit int64) {
+	booked, charge, basis := b.runner(p, h, r)
+	limit = charge
+	if basis == basisRaised {
+		limit = max(limit, booked)
+	}
+	if b == nil {
+		return limit, limit
+	}
+	peak = limit
+	if key, ok := b.runnerJobs[r.ID]; ok {
+		key.PoolID = p.ID
+		if e, known := expectedPeak(b.jobs[key], 0.9); known {
+			peak = e
+		}
+	} else if e, known := b.typical[p.ID]; known {
+		peak = e
+	}
+	return min(peak, limit), limit
+}
+
+// typicalStart is what a runner of p placed now at sizeMB is expected to peak
+// at under the growth guard: its pool's median run, or what the jobs waiting
+// need where the pass places for that (need, from history_sizing=on), never
+// above the size. The size where the pool's median is not known.
+func (b *booker) typicalStart(p *store.Pool, sizeMB int64, need *Requirement) int64 {
+	if b == nil || sizeMB <= 0 {
+		return sizeMB
+	}
+	e, known := b.typical[p.ID]
+	if !known {
+		return sizeMB
+	}
+	if need != nil {
+		e = max(e, need.MemoryMB)
+	}
+	return min(e, sizeMB)
 }
 
 type jobBooking struct {
@@ -179,10 +255,13 @@ func newBooker(mode string, headroom int, in *BookingInputs, history map[store.J
 	if mode != BookingHistory || in == nil {
 		return nil
 	}
-	b := &booker{headroom: headroom, jobs: history, runnerJobs: in.RunnerJobs, unknown: map[string]int64{}}
+	b := &booker{headroom: headroom, jobs: history, runnerJobs: in.RunnerJobs, unknown: map[string]int64{}, typical: map[string]int64{}}
 	for _, p := range pools {
 		if p == nil {
 			continue
+		}
+		if e, ok := expectedPeak(in.PoolRuns[p.ID], 0.5); ok {
+			b.typical[p.ID] = e
 		}
 		mb, ok := historyBooking(in.PoolRuns[p.ID], headroom)
 		if !ok {
@@ -324,18 +403,23 @@ type HostBooking struct {
 	// host, admits a start on the measured free memory alone and reads the
 	// booking only to order hosts; booked also holds it to the ceiling.
 	Admission string `json:"admission,omitempty"`
-	// GrowthReserveMB is the most any one live runner on this host (on its
-	// machine, for an agent sharing one) may still grow by: what it is booked
-	// for less what it was last measured using. Under measured admission it is
-	// held back from the measured free memory with the reserve, so a start
-	// never takes the memory the heaviest job already running is about to
-	// need.
-	GrowthReserveMB int64 `json:"growth_reserve_mb,omitempty"`
+	// GrowthReserveMB is the growth guard measured admission holds back from
+	// the machine's measured free memory with the reserve: ExpectedGrowthMB,
+	// what every live runner on the host (on its machine, for an agent sharing
+	// one) may still grow by from what it was last measured using to what its
+	// job typically peaks at, plus LimitGrowthMB, the most any one of them may
+	// grow past that to its limit. A runner its host's sample cannot contain
+	// yet counts its start charge as what it uses.
+	GrowthReserveMB  int64 `json:"growth_reserve_mb,omitempty"`
+	ExpectedGrowthMB int64 `json:"expected_growth_mb,omitempty"`
+	LimitGrowthMB    int64 `json:"limit_growth_mb,omitempty"`
 }
 
 // bookingTotals adds up what the live runners on each host are booked for and
-// typed at, by host ID, in one pass over the fleet.
-func bookingTotals(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, b *booker) map[string]*HostBooking {
+// typed at, and the growth guard's two parts, by host ID, in one pass over the
+// fleet. charges and pct are the start charges recorded for runners still
+// pending (nil for none) and the start charge percentage.
+func bookingTotals(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, b *booker, charges map[string]Reservation, pct int64) map[string]*HostBooking {
 	out := make(map[string]*HostBooking, len(hosts))
 	byID := make(map[string]*store.Host, len(hosts))
 	for _, h := range hosts {
@@ -363,9 +447,25 @@ func bookingTotals(hosts []*store.Host, pools []*store.Pool, runners map[string]
 			t := out[h.ID]
 			t.BookedMemoryMB += booked
 			t.TypedMemoryMB += charge
-			// What it may still grow by: a runner booked for more than it is
-			// using now can take that much more of the machine without a start.
-			t.GrowthReserveMB = max(t.GrowthReserveMB, booked-r.MemoryBytes>>20)
+			// What it may still grow by, from what it uses now: to what its
+			// job typically peaks at, summed, and past that to its limit, the
+			// largest. A runner the host's sample cannot contain yet is
+			// using its start charge, which the measurement is already
+			// charged.
+			peak, limit := b.expected(p, h, r)
+			using := r.MemoryBytes >> 20
+			if pendingOn(h, r) {
+				if c, ok := charges[r.ID]; ok {
+					using = min(c.MemoryMB, charge)
+				} else if charges == nil {
+					using = charge * pct / 100
+				} else {
+					using = charge
+				}
+			}
+			t.ExpectedGrowthMB += max(peak-using, 0)
+			t.LimitGrowthMB = max(t.LimitGrowthMB, limit-max(peak, using))
+			t.GrowthReserveMB = t.ExpectedGrowthMB + t.LimitGrowthMB
 			switch basis {
 			case basisTyped:
 			case basisRaised:
@@ -411,12 +511,15 @@ func machineGroups(hosts []*store.Host, label string) map[string][]*store.Host {
 // at sampledAt cannot yet contain: those still starting, and those created or
 // started since. It is hostTotals.add's pending, asked against one sample for
 // runners on several agents of one machine.
-func pendingAgainst(hs []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, sample *store.Host) int64 {
+//
+// The second figure is the start charges recorded for some of them (charges,
+// Snapshot.StartCharges); the first is the whole charge of the rest.
+func pendingAgainst(hs []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, sample *store.Host, charges map[string]Reservation) (int64, int64) {
 	on := make(map[string]*store.Host, len(hs))
 	for _, h := range hs {
 		on[h.ID] = h
 	}
-	var out int64
+	var out, charged int64
 	for _, p := range pools {
 		if p == nil {
 			continue
@@ -432,9 +535,14 @@ func pendingAgainst(hs []*store.Host, pools []*store.Pool, runners map[string][]
 			starting := r.State == store.RunnerProvisioning || r.State == store.RunnerRegistering
 			if starting || r.CreatedAt.After(sample.Usage.SampledAt) ||
 				(r.ContainerStartedAt != nil && r.ContainerStartedAt.After(sample.Usage.SampledAt)) {
-				out += RunnerCharge(p, h, r).MemoryMB
+				full := RunnerCharge(p, h, r).MemoryMB
+				if c, ok := charges[r.ID]; ok {
+					charged += min(c.MemoryMB, full)
+				} else {
+					out += full
+				}
 			}
 		}
 	}
-	return out
+	return out, charged
 }

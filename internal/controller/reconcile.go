@@ -257,6 +257,7 @@ func (c *Controller) snapshot(ctx context.Context) (scheduler.Snapshot, error) {
 		HostOrder: c.cfg().Scheduler.HostOrder,
 		Readiness: readiness, PreferReadiness: c.cfg().Scheduler.PlacementMode == "readiness",
 		LastProvisioned:    lastProvisioned,
+		StartCharges:       c.startChargesAt(now),
 		Now:                now,
 		HeldInstallations:  c.heldInstallations(now),
 		Pools:              pools,
@@ -563,6 +564,7 @@ func (c *Controller) createRunner(ctx context.Context, pool *store.Pool, host *s
 	if err := c.st.CreateRunner(ctx, r); err != nil {
 		return fmt.Errorf("creating the runner row for %s: %w", name, err)
 	}
+	c.recordStartCharge(r.ID, a.StartCharge, c.Now())
 	if !queuedSince.IsZero() {
 		observeDuration(c.metrics.queuedToCreate, pool.Name, string(pool.Backend), queuedSince, r.CreatedAt)
 	}

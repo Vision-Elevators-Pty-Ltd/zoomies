@@ -84,6 +84,17 @@ type Snapshot struct {
 	// from: each pool's recent runs, and the job each runner is running, whose
 	// own runs are in JobHistory. Nil books every runner at its size.
 	Booking *BookingInputs
+	// StartCharges is, by runner ID, what each runner created by an earlier
+	// pass was charged against its host's measured free memory and CPU when it
+	// was placed (Action.StartCharge). Until a host sample contains a runner,
+	// the next passes charge it that much again: the start charge is the
+	// larger of a share of its size and what the jobs waiting were known to
+	// need, which a later pass cannot work out again from the runner alone.
+	// A runner absent from a non-nil map (one placed before the controller
+	// started) is charged its whole size, the safe answer. Nil, as a caller
+	// that keeps no record passes, charges every such runner the start
+	// charge's share of its size, as before the field existed.
+	StartCharges map[string]Reservation
 	// HostOrder is scheduler.host_order: the order placement prefers hosts that
 	// can all take a runner in -- see HostOrderHeadroom and the constants
 	// beside it. An empty value is headroom, which is what every fleet had
@@ -259,6 +270,11 @@ type Action struct {
 	// SizedFromHistory says Size is above the standard rather than below it:
 	// the runner was sized for what the jobs waiting are known to need.
 	SizedFromHistory bool `json:"sized_from_history,omitempty"`
+	// StartCharge is, for an ActionCreate, what the runner was charged against
+	// its host's measured free memory and CPU when it was placed. The caller
+	// hands it back in Snapshot.StartCharges until a host sample contains the
+	// runner, so the passes in between charge it the same.
+	StartCharge Reservation `json:"-"`
 }
 
 // sizePhrase says a runner size the way the reason for a create does.
@@ -432,7 +448,7 @@ func Decide(s Snapshot) Plan {
 		hosts: newHostSetFrom(s.Hosts, pools, s.Runners, s.Now, ledger{
 			overcommitPercent: s.Policy.MemoryOvercommitPercent, cpuOvercommitPercent: s.Policy.CPUOvercommitPercent,
 			startChargePercent: s.Policy.StartChargePercent, machineLabel: s.Policy.MachineLabel,
-			book: book, admitByMeasure: s.Policy.admitByMeasure(),
+			book: book, admitByMeasure: s.Policy.admitByMeasure(), startCharges: s.StartCharges,
 		}),
 		budget:             s.Policy.MaxCreatesPerTick,
 		activeByRepository: s.ActiveByRepository,
@@ -1165,7 +1181,7 @@ func (t *tick) grant(p *store.Pool, plan *PoolPlan, runners []*store.Runner, que
 			plan.History = "shadow: history sizing would have " + held
 		}
 	}
-	action := Action{Kind: ActionCreate, PoolID: p.ID, PoolName: p.Name, HostID: placed[0].hostID, Reason: reason, Size: placed[0].size, SizedFromHistory: placed[0].raised}
+	action := Action{Kind: ActionCreate, PoolID: p.ID, PoolName: p.Name, HostID: placed[0].hostID, Reason: reason, Size: placed[0].size, SizedFromHistory: placed[0].raised, StartCharge: placed[0].charge}
 	plan.Actions = append(plan.Actions, action)
 	t.creates = append(t.creates, action)
 	t.budget--
@@ -1443,13 +1459,19 @@ type hostSet struct {
 	siblings  map[string][]string
 	bookings  map[string]*HostBooking
 	// byMeasure is scheduler.memory_admission=measured with memory overcommit
-	// on: a host in the overcommitted ledger (byHistory) has room for what its
-	// measurement says, and its booking only orders it against the others.
-	// growth is, by host, the growth guard held back from its measurement
-	// (HostBooking.GrowthReserveMB, the machine's for an agent sharing one),
-	// raised as the pass places runners booked for more.
+	// on: a host in the overcommitted ledger (byHistory) may also admit a
+	// start on its measurement less the growth guard, and its booking only
+	// orders it against the others. growthSum and growthMax are, by host (the
+	// machine's, for an agent sharing one), the two parts of that guard:
+	// what every runner there may still grow by to its job's ninetieth
+	// percentile, and the most one of them may grow past that to its limit
+	// (HostBooking.ExpectedGrowthMB and LimitGrowthMB). Each start placed
+	// adds its own.
 	byMeasure bool
-	growth    map[string]int64
+	growthSum map[string]int64
+	growthMax map[string]int64
+	// startCharges is Snapshot.StartCharges, nil where none is recorded.
+	startCharges map[string]Reservation
 	// order is scheduler.host_order; see Snapshot.HostOrder.
 	order string
 	// need is set while a runner is being placed for a known requirement
@@ -1585,6 +1607,10 @@ type ledger struct {
 	// admitByMeasure is scheduler.memory_admission=measured: see
 	// hostSet.byMeasure. It changes nothing below 100% overcommit.
 	admitByMeasure bool
+	// startCharges is Snapshot.StartCharges: what a runner still pending was
+	// charged when it was placed. Nil charges each the start charge's share of
+	// its size.
+	startCharges map[string]Reservation
 }
 
 // newHostSetFrom is the host set a pass places against.
@@ -1639,18 +1665,20 @@ func newHostSetFrom(hosts []*store.Host, pools []*store.Pool, runners map[string
 	// every pool and every runner for the ones on it, which is hosts times runners
 	// three times over: 73% of Decide on a quiet fleet of a hundred pools in a
 	// profile.
-	totals := totalsByHost(hs.hosts, pools, runners)
+	hs.startCharges = opts.startCharges
+	totals := totalsByHostCharged(hs.hosts, pools, runners, opts.startCharges)
 	// What they are booked for in the overcommitted ledger, where it differs
 	// from what they are charged: by history, or across a machine's agents.
 	groups := machineGroups(hs.hosts, opts.machineLabel)
 	var booked map[string]*HostBooking
 	if overcommit {
 		hs.book = opts.book
-		booked = bookingTotals(hs.hosts, pools, runners, opts.book)
+		booked = bookingTotals(hs.hosts, pools, runners, opts.book, opts.startCharges, pct)
 		hs.bookings = booked
 		if opts.admitByMeasure {
 			hs.byMeasure = true
-			hs.growth = make(map[string]int64, len(hs.hosts))
+			hs.growthSum = make(map[string]int64, len(hs.hosts))
+			hs.growthMax = make(map[string]int64, len(hs.hosts))
 		}
 	}
 	for i, h := range hs.hosts {
@@ -1698,13 +1726,17 @@ func newHostSetFrom(hosts []*store.Host, pools []*store.Pool, runners map[string
 			hs.warmingDinD[h.ID] += t.warmingDinD
 		}
 		pending := t.pending
-		// Starts the sample cannot contain yet are charged their start charge,
-		// not their size: what each is known to need is not to hand for a
-		// runner placed in an earlier pass, so the percentage alone is used.
-		if pct < 100 {
+		// Starts the sample cannot contain yet are charged what they were
+		// charged when they were placed (Snapshot.StartCharges), which can be
+		// a job's whole need rather than the percentage. One with no record,
+		// where records are kept, is charged its whole size; where none are
+		// kept, the percentage of it, as before the record existed.
+		if pct < 100 && opts.startCharges == nil {
 			pending.MemoryMB = pending.MemoryMB * pct / 100
 			pending.CPUs = pending.CPUs * float64(pct) / 100
 		}
+		pending.MemoryMB += t.pendingCharged.MemoryMB
+		pending.CPUs += t.pendingCharged.CPUs
 		hs.bookedMemory[h.ID] = l.MemoryMB
 		if h.Usage.Fresh(now) {
 			if v := h.Usage.MemoryAvailableMB; v != nil {
@@ -1734,8 +1766,9 @@ func newHostSetFrom(hosts []*store.Host, pools []*store.Pool, runners map[string
 					// taken after the floor at zero, so that the guard
 					// added back (measuredOnly's booked rule) is exactly
 					// the figure the booked admission reads.
-					hs.growth[h.ID] = booked[h.ID].GrowthReserveMB
-					hs.measuredMemory[h.ID] -= hs.growth[h.ID]
+					hs.growthSum[h.ID] = booked[h.ID].ExpectedGrowthMB
+					hs.growthMax[h.ID] = booked[h.ID].LimitGrowthMB
+					hs.measuredMemory[h.ID] -= hs.guard(h.ID)
 					l.MemoryMB = hs.measuredLeft(h.ID)
 				}
 			}
@@ -1776,10 +1809,11 @@ func (hs *hostSet) shareMachine(machine string, members []*store.Host, pools []*
 	// One measurement: the lowest any agent sampled, less every start on the
 	// machine that sample cannot contain yet, and, overcommitted, the largest
 	// of the agents' reserves.
-	pending := pendingAgainst(members, pools, runners, sample)
-	if pct < 100 {
+	pending, charged := pendingAgainst(members, pools, runners, sample, hs.startCharges)
+	if pct < 100 && hs.startCharges == nil {
 		pending = pending * pct / 100
 	}
+	pending += charged
 	available := *sample.Usage.MemoryAvailableMB - pending
 	if overcommit {
 		var reserve int64
@@ -1789,15 +1823,17 @@ func (hs *hostSet) shareMachine(machine string, members []*store.Host, pools []*
 		available -= reserve
 	}
 	available = max(available, 0)
-	// Under measured admission, the machine's growth guard: the most any one
-	// runner on any of its agents may still grow by, held back after the
-	// floor at zero as on a machine of one agent.
-	var growth int64
+	// Under measured admission, the machine's growth guard: what every runner
+	// on any of its agents may still grow by to its job's ninetieth
+	// percentile, and the most one of them may grow past that to its limit,
+	// held back after the floor at zero as on a machine of one agent.
+	var growthSum, growthMax int64
 	if hs.byMeasure {
 		for _, h := range members {
-			growth = max(growth, booked[h.ID].GrowthReserveMB)
+			growthSum += booked[h.ID].ExpectedGrowthMB
+			growthMax = max(growthMax, booked[h.ID].LimitGrowthMB)
 		}
-		available -= growth
+		available -= growthSum + growthMax
 	}
 	// One ceiling: the machine's booking memory once, against what every agent
 	// on it is booked for.
@@ -1827,7 +1863,7 @@ func (hs *hostSet) shareMachine(machine string, members []*store.Host, pools []*
 		}
 		hs.measuredMemory[h.ID] = available
 		if hs.byMeasure {
-			hs.growth[h.ID] = growth
+			hs.growthSum[h.ID], hs.growthMax[h.ID] = growthSum, growthMax
 		}
 		if overcommit {
 			hs.bookedMemory[h.ID] = ceiling - sum
@@ -1841,7 +1877,8 @@ func (hs *hostSet) shareMachine(machine string, members []*store.Host, pools []*
 			if hb.Overcommitted {
 				hb.MachineBookedMemoryMB, hb.MachineTypedMemoryMB, hb.MachineCeilingMB = sum, typed, ceiling
 				if hs.byMeasure {
-					hb.GrowthReserveMB = growth
+					hb.ExpectedGrowthMB, hb.LimitGrowthMB = growthSum, growthMax
+					hb.GrowthReserveMB = growthSum + growthMax
 				}
 			}
 		}
@@ -1866,9 +1903,16 @@ func (hs *hostSet) syncMemory(id string) {
 // measuredOnly reports whether a start on host id is admitted under measured
 // admission: memory overcommit on, and a host in the overcommitted ledger.
 // There, measuredMemory is the measurement less the growth guard, and the
-// measurement booked admission reads is that plus growth.
+// measurement booked admission reads is that plus the guard.
 func (hs *hostSet) measuredOnly(id string) bool {
 	return hs.byMeasure && hs.byHistory[id]
+}
+
+// guard is the growth guard held back from host id's measurement: what every
+// runner on its machine may still grow by to its job's ninetieth percentile,
+// and the most one of them may grow past that to its limit.
+func (hs *hostSet) guard(id string) int64 {
+	return hs.growthSum[id] + hs.growthMax[id]
 }
 
 // measuredLeft is the memory left on a host admitted by measurement, as the
@@ -1877,25 +1921,38 @@ func (hs *hostSet) measuredOnly(id string) bool {
 // past the growth guard. Measured admission admits wherever either does.
 func (hs *hostSet) measuredLeft(id string) int64 {
 	m := hs.measuredMemory[id]
-	return max(min(hs.bookedMemory[id], m+hs.growth[id]), m)
+	return max(min(hs.bookedMemory[id], m+hs.guard(id)), m)
 }
 
-// raiseGrowth raises the growth guard of h, and of every agent sharing its
-// machine, to a runner just placed there booked for bookMB: it uses next to
-// nothing yet, so all of its booking is growth still to come. Only the
-// difference above the guard already held is taken from the measurement.
-func (hs *hostSet) raiseGrowth(h *store.Host, bookMB int64) {
-	if !hs.measuredOnly(h.ID) || bookMB <= hs.growth[h.ID] {
+// startGrowth is what one start of p at typedMB, charged chargeMB against the
+// measurement, adds to the growth guard: how far it may grow past its charge
+// to what its jobs typically use (expected), and how far past that to its
+// limit (toLimit). Before GitHub hands it a job, what it typically uses is its
+// pool's median run (booker.typicalStart), or what the jobs waiting need where
+// the pass places for that; its size where neither is known.
+func (hs *hostSet) startGrowth(p *store.Pool, typedMB, chargeMB int64) (expected, toLimit int64) {
+	e := hs.book.typicalStart(p, typedMB, hs.need)
+	expected = max(e-chargeMB, 0)
+	toLimit = max(typedMB-max(e, chargeMB), 0)
+	return expected, toLimit
+}
+
+// raiseGrowth adds a start just placed on h, with the growth startGrowth
+// gives it, to the guard of h and of every agent sharing its machine, and takes
+// what that adds to the guard from their measurements.
+func (hs *hostSet) raiseGrowth(h *store.Host, expected, toLimit int64) {
+	if !hs.measuredOnly(h.ID) {
 		return
 	}
-	extra := bookMB - hs.growth[h.ID]
 	for _, id := range append([]string{h.ID}, hs.siblings[h.ID]...) {
 		if !hs.measuredOnly(id) {
 			continue
 		}
-		hs.growth[id] = bookMB
+		before := hs.guard(id)
+		hs.growthSum[id] += expected
+		hs.growthMax[id] = max(hs.growthMax[id], toLimit)
 		if m, ok := hs.measuredMemory[id]; ok {
-			hs.measuredMemory[id] = m - extra
+			hs.measuredMemory[id] = m - (hs.guard(id) - before)
 		}
 		hs.syncMemory(id)
 	}
@@ -1917,6 +1974,9 @@ type placement struct {
 	// booking says how the runner was booked in the overcommitted ledger, for
 	// the reason; empty where it was booked its size against its own host.
 	booking string
+	// charge is what the runner was charged against the host's measured free
+	// memory and CPU (Action.StartCharge).
+	charge Reservation
 }
 
 // place reserves up to n slots for the pool and returns the chosen host IDs.
@@ -2010,17 +2070,19 @@ func (hs *hostSet) placeAvoiding(p *store.Pool, n int, avoid map[string]bool) []
 			}
 			hs.syncMemory(id)
 		}
-		hs.raiseGrowth(h, book)
+		expected, toLimit := hs.startGrowth(p, res.MemoryMB, charge)
+		hs.raiseGrowth(h, expected, toLimit)
 		hs.promisedMemory[h.ID] -= res.MemoryMB
 		hs.ours[h.ID] = true
-		if cpu, ok := hs.observedCPU[h.ID]; ok {
-			charge := res.CPUs
-			if hs.startChargePercent < 100 && res.CPUs > 0 {
-				charge = min(max(res.CPUs*float64(hs.startChargePercent)/100, needCPUs), res.CPUs)
-			}
-			hs.observedCPU[h.ID] = max(cpu-charge, 0)
+		cpuCharge := res.CPUs
+		if hs.startChargePercent < 100 && res.CPUs > 0 {
+			cpuCharge = min(max(res.CPUs*float64(hs.startChargePercent)/100, needCPUs), res.CPUs)
 		}
-		out = append(out, placement{hostID: h.ID, size: size, raised: raised, raisedFor: raisedFor, booking: hs.bookingPhrase(h, book, res.MemoryMB)})
+		if cpu, ok := hs.observedCPU[h.ID]; ok {
+			hs.observedCPU[h.ID] = max(cpu-cpuCharge, 0)
+		}
+		out = append(out, placement{hostID: h.ID, size: size, raised: raised, raisedFor: raisedFor, booking: hs.bookingPhrase(h, book, res.MemoryMB),
+			charge: Reservation{CPUs: cpuCharge, MemoryMB: charge}})
 	}
 	return out
 }
@@ -2048,6 +2110,9 @@ func (hs *hostSet) pickReduced(p *store.Pool, avoid map[string]bool) (*store.Hos
 		}
 		charge, grant, ok := ReducedSize(p, h, hs.leftFor(h, p), hs.alloc[h.ID])
 		if !ok {
+			continue
+		}
+		if charge, grant, ok = hs.admitReduced(h, p, charge, grant); !ok {
 			continue
 		}
 		// How much of the standard this host can give, as a share of it: the
@@ -2079,6 +2144,40 @@ func (hs *hostSet) pickReduced(p *store.Pool, avoid map[string]bool) (*store.Hos
 		return nil, Reservation{}, store.Resources{}
 	}
 	return best.h, best.charge, best.grant
+}
+
+// admitReduced asks the memory admission again of a reduced runner, at its
+// reduced size: the room ReducedSize was given was worked out for a start of
+// the pool's standard size, whose start charge, booking and growth differ, so a
+// smaller runner it seemed to fit may not. It returns the largest size, from
+// the one proposed down to the pool's minimum, that the host admits as a start
+// of its own (memoryLeftAt asked of that size), or false where not even the
+// minimum is admitted. Admission only tightens as the size grows, so the
+// largest is found by halving.
+func (hs *hostSet) admitReduced(h *store.Host, p *store.Pool, charge Reservation, grant store.Resources) (Reservation, store.Resources, bool) {
+	if !hs.alloc[h.ID].MemoryKnown || charge.MemoryMB <= 0 || grant.MemoryMB <= 0 {
+		return charge, grant, true
+	}
+	admits := func(mb int64) bool { return hs.memoryLeftAt(h, p, mb) >= mb }
+	if admits(charge.MemoryMB) {
+		return charge, grant, true
+	}
+	factor := max(charge.MemoryMB/grant.MemoryMB, 1)
+	floor := MinimumReserve(sizedOn(p, h), h).MemoryMB
+	lo, hi := (floor+factor-1)/factor, grant.MemoryMB-1 // in units of one container's MB
+	if lo <= 0 || lo > hi || !admits(lo*factor) {
+		return Reservation{}, store.Resources{}, false
+	}
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		if admits(mid * factor) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	charge.MemoryMB, grant.MemoryMB = lo*factor, lo
+	return charge, grant, true
 }
 
 // pick prefers the host with the most proportional headroom after placing
@@ -2200,18 +2299,19 @@ func (hs *hostSet) memoryLeftAt(h *store.Host, p *store.Pool, typed int64) int64
 		//   - booked: the booking has room for what the start books, and the
 		//     measurement (without the guard) for its charge, as below;
 		//   - measured: the measurement less the growth guard has room for its
-		//     charge, the booking unasked. A start booked for more than the
-		//     guard raises it by the difference (raiseGrowth), so that is
-		//     asked too.
+		//     charge, the booking unasked. The guard includes the start's own
+		//     growth (startGrowth), so that is asked too.
 		var needMB int64
 		if hs.need != nil {
 			needMB = hs.need.MemoryMB
 		}
 		book := hs.book.start(p, typed, hs.need)
-		guard := hs.growth[h.ID]
-		unguarded := hs.measuredMemory[h.ID] + guard + typed - startCharge(typed, needMB, hs.startChargePercent)
-		bookedRule := min(hs.bookedMemory[h.ID]+typed-book, unguarded)
-		measuredRule := unguarded - max(guard, book)
+		charge := startCharge(typed, needMB, hs.startChargePercent)
+		expected, toLimit := hs.startGrowth(p, typed, charge)
+		unguarded := hs.measuredMemory[h.ID] + hs.guard(h.ID)
+		bookedRule := min(hs.bookedMemory[h.ID]+typed-book, unguarded+typed-charge)
+		guardAfter := hs.growthSum[h.ID] + expected + max(hs.growthMax[h.ID], toLimit)
+		measuredRule := unguarded - charge - guardAfter + typed
 		return max(bookedRule, measuredRule)
 	}
 	var cheaper int64
@@ -2247,9 +2347,9 @@ func (hs *hostSet) shortOfMemory(h *store.Host, p *store.Pool) string {
 			needMB = hs.need.MemoryMB
 		}
 		charge := startCharge(typed, needMB, hs.startChargePercent)
-		growth := hs.growth[h.ID]
 		book := hs.book.start(p, typed, hs.need)
-		unguarded := hs.measuredMemory[h.ID] + growth
+		expected, toLimit := hs.startGrowth(p, typed, charge)
+		unguarded := hs.measuredMemory[h.ID] + hs.guard(h.ID)
 		if unguarded < charge {
 			return fmt.Sprintf("%s: it has %s measured free past its reserve and pending starts, and a start is charged %s",
 				naming.ForSentence(h.Name), formatMB(max(unguarded, 0)), formatMB(charge))
@@ -2259,8 +2359,9 @@ func (hs *hostSet) shortOfMemory(h *store.Host, p *store.Pool) string {
 			booked = fmt.Sprintf("; nor has its booking room, with %s of %s left where a new runner books %s",
 				formatMB(max(hs.bookedMemory[h.ID], 0)), formatMB(hb.MachineCeilingMB), formatMB(book))
 		}
-		return fmt.Sprintf("%s: it has %s measured free past its reserve and pending starts, %s once the %s the heaviest runner there may still grow by is held back, and a start needs %s of it%s",
-			naming.ForSentence(h.Name), formatMB(unguarded), formatMB(max(unguarded-max(growth, book), 0)), formatMB(max(growth, book)), formatMB(charge), booked)
+		sum := hs.growthSum[h.ID] + expected
+		return fmt.Sprintf("%s: it has %s measured free past its reserve and pending starts, and a start needs %s of it plus the growth guard: %s its runners and the start may still grow by to what their jobs typically use, and %s one of them may grow past that to its limit%s",
+			naming.ForSentence(h.Name), formatMB(unguarded), formatMB(charge), formatMB(sum), formatMB(max(hs.growthMax[h.ID], toLimit)), booked)
 	}
 	if hb := hs.bookings[h.ID]; hb != nil && hs.byHistory[h.ID] {
 		book := hs.book.start(p, typed, hs.need)

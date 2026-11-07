@@ -741,6 +741,7 @@ the pool at creation would not.
 | `max_runner_lifetime` | `scheduler.max_runner_lifetime` | Let a runner live until something else removes it |
 | `scale_up_delay` | `scheduler.scale_up_delay` | Scale the moment a job is queued |
 | `docker_wait` | `runners.docker_wait` | Leave the runner image's own wait in place |
+| `shm_size_mb` | `runners.shm_size_mb` (2048) | Docker's own 64 MB `/dev/shm`. A number of MB, not a duration. The size is a ceiling on a tmpfs: only what a job writes is used, and it counts against the runner's memory limit, which also caps it. Chromium needs more than 64 MB, or it falls back to `/tmp` and can capture an empty screenshot. |
 
 Zero is an answer in each of them rather than an absence, which is why the API
 distinguishes an absent field from an explicit `null`: absent leaves what the

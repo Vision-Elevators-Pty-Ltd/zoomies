@@ -637,6 +637,25 @@ func pairLimits(spec Spec) (runner, daemon store.Resources) {
 // which records the runner's own half and must not work it out a second way.
 func PairLimits(spec Spec) (runner, daemon store.Resources) { return pairLimits(spec) }
 
+// runnerShmBytes is the runner container's /dev/shm in bytes: shmMB, held to
+// the runner's memory limit (limitMB, zero for none) because a tmpfs's pages
+// are charged to the container that writes them, so more than the limit could
+// never be used. Zero leaves the engine's default, 64 MB.
+//
+// Docker's 64 MB is too little for Chromium, which keeps its shared memory
+// there: it falls back to /tmp on disk, and a Playwright screenshot taken in
+// the runner container itself came back empty. Only the pages a job writes
+// are used, so a large size costs nothing a job does not use.
+func runnerShmBytes(shmMB, limitMB int64) int64 {
+	if shmMB <= 0 {
+		return 0
+	}
+	if limitMB > 0 {
+		shmMB = min(shmMB, limitMB)
+	}
+	return shmMB << 20
+}
+
 func buildRunnerConfig(spec Spec, fl flavor, o containerOptions) ContainerCreateRequest {
 	labels := spec.Labels(o.Now)
 	labels[LabelRole] = roleRunner
@@ -723,6 +742,7 @@ func buildRunnerConfig(spec Spec, fl flavor, o containerOptions) ContainerCreate
 	if o.VolumesFrom != "" {
 		hc.VolumesFrom = []string{o.VolumesFrom}
 	}
+	hc.ShmSize = runnerShmBytes(spec.ShmSizeMB, res.MemoryMB)
 
 	if o.HostSocket != "" {
 		// No relabel suffix here. ":z" relabels the *source*, and the source

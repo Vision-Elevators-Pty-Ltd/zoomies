@@ -857,6 +857,9 @@ type RunnerSettings struct {
 	// runners.docker_wait, and means nothing on a pool whose docker_mode is
 	// none -- there is no daemon to wait for.
 	DockerWait *Duration `json:"docker_wait,omitempty"`
+	// ShmSizeMB is the size of /dev/shm in a runner container of this pool,
+	// in MB. Overrides runners.shm_size_mb; zero leaves Docker's own 64 MB.
+	ShmSizeMB *int64 `json:"shm_size_mb,omitempty"`
 }
 
 // Set reports whether this pool overrides anything at all, which is what the
@@ -864,7 +867,7 @@ type RunnerSettings struct {
 // a figure came from the pool.
 func (r RunnerSettings) Set() bool {
 	return r.ProvisionTimeout != nil || r.DrainTimeout != nil || r.MaxRunnerLifetime != nil ||
-		r.ScaleUpDelay != nil || r.DockerWait != nil
+		r.ScaleUpDelay != nil || r.DockerWait != nil || r.ShmSizeMB != nil
 }
 
 // Supports reports whether this host's agent advertises a feature. The

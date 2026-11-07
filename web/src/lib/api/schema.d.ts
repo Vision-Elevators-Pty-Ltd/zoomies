@@ -7758,6 +7758,12 @@ export interface components {
              * @example 120s
              */
             docker_wait?: components["schemas"]["Duration"] | null;
+            /**
+             * Format: int64
+             * @description The size of /dev/shm in a runner container of this pool, in MB: a number, not a duration. Overrides `runners.shm_size_mb` (2048 by default); `0` leaves Docker's own 64 MB. It is a tmpfs, so only what a job writes is used, and that counts against the runner's memory limit, which also caps it. Applied by agents 1.4.1-vision.9 and later.
+             * @example 2048
+             */
+            shm_size_mb?: number | null;
         };
         /** @description One host's room for a pool: what it promises, what the machine can back at that pool's size, and what one runner of it is charged there. */
         PoolHostRoom: {
@@ -8398,6 +8404,8 @@ export interface components {
                 max_runner_lifetime?: string | null;
                 scale_up_delay?: string | null;
                 docker_wait?: string | null;
+                /** Format: int64 */
+                shm_size_mb?: number | null;
             };
             cache: components["schemas"]["CacheConfig"];
             tmpfs?: components["schemas"]["TmpfsConfig"];
@@ -16938,6 +16946,12 @@ export interface operations {
                              * @example 2m0s
                              */
                             docker_wait: string;
+                            /**
+                             * Format: int64
+                             * @description `runners.shm_size_mb`: the /dev/shm a runner container gets, in MB; 0 is Docker's own 64 MB.
+                             * @example 2048
+                             */
+                            shm_size_mb: number;
                         };
                     };
                 };

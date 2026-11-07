@@ -109,6 +109,7 @@ type poolDocumentTimings struct {
 	MaxRunnerLifetime *string `json:"max_runner_lifetime"`
 	ScaleUpDelay      *string `json:"scale_up_delay"`
 	DockerWait        *string `json:"docker_wait"`
+	ShmSizeMB         *int64  `json:"shm_size_mb"`
 }
 
 func durationText(d *store.Duration) *string {
@@ -154,6 +155,7 @@ func documentPool(p *store.Pool, installation string) poolDocument {
 			MaxRunnerLifetime: durationText(p.RunnerSettings.MaxRunnerLifetime),
 			ScaleUpDelay:      durationText(p.RunnerSettings.ScaleUpDelay),
 			DockerWait:        durationText(p.RunnerSettings.DockerWait),
+			ShmSizeMB:         p.RunnerSettings.ShmSizeMB,
 		},
 		Cache:            p.Cache,
 		Tmpfs:            p.Tmpfs,

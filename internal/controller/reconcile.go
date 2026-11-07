@@ -650,6 +650,7 @@ func (c *Controller) finishCreateRunner(ctx context.Context, inst *store.Install
 		DockerMode:    pool.DockerMode,
 		DinDImage:     pool.DinDImage,
 		RunAsRoot:     pool.RunAsRoot,
+		ShmSizeMB:     shmSizeMB(c.cfg().Runners, pool),
 		Network:       c.cfg().Agent.Network,
 		RunnerVersion: r.RunnerVersion,
 	}

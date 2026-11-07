@@ -1070,6 +1070,13 @@ type Runners struct {
 	// image as ZOOMIES_DOCKER_WAIT, in whole seconds. Zero leaves the image's
 	// own default in place.
 	DockerWait time.Duration `yaml:"docker_wait"`
+	// ShmSizeMB is the size of /dev/shm in every runner container, in MB,
+	// unless a pool's runner_settings.shm_size_mb says otherwise. Docker gives
+	// a container 64 MB, and Chromium, which keeps its shared memory there,
+	// falls back to /tmp on disk and can then capture an empty screenshot.
+	// It is a tmpfs, so only the pages a job writes are used, and they are
+	// charged to the runner's own memory limit. Zero leaves Docker's 64 MB.
+	ShmSizeMB int64 `yaml:"shm_size_mb"`
 	// Env is extra environment for every runner. It is visible to every job
 	// that runs, so it is the place for a proxy or a mirror and not for a
 	// credential: a pool's env, or a GitHub secret, is where those belong.
@@ -1400,7 +1407,9 @@ func Default() *Config {
 		// fresh sidecar on a host that is also extracting images takes longer
 		// than the thirty seconds the first version allowed.
 		Runners: Runners{
-			DockerWait:      3 * time.Minute,
+			DockerWait: 3 * time.Minute,
+			// Room for a browser's shared memory: Docker's 64 MB is not.
+			ShmSizeMB:       DefaultShmSizeMB,
 			DefaultCPUs:     DefaultRunnerCPUs,
 			DefaultMemoryMB: DefaultRunnerMemoryMB,
 			// The size classes' runners, held equal to scheduler.DefaultSizeConfig

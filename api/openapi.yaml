@@ -15610,6 +15610,32 @@ components:
             Whether this ledger is the one the pass placed by: memory is overcommitted and the
             host had a fresh sample. Otherwise the host is booked its runners' sizes against its
             own allocatable memory.
+        admission:
+          type: string
+          enum: [measured, booked]
+          description: >-
+            `scheduler.memory_admission`. Measured admits a start on this overcommitted host on its
+            measured free memory, less the reserve, the pending starts and `growth_reserve_mb`, or
+            wherever booked admission would; the booking then only orders hosts. Booked also
+            refuses a start once the machine is booked to its ceiling.
+        growth_reserve_mb:
+          type: integer
+          format: int64
+          description: >-
+            The growth guard, `expected_growth_mb` plus `limit_growth_mb`, held back from the
+            machine's measured free memory under measured admission.
+        expected_growth_mb:
+          type: integer
+          format: int64
+          description: >-
+            What every live runner on this host's machine may still grow by, from what it was last
+            measured using (a runner the host's sample cannot contain yet: its start charge) to what
+            its job typically peaks at: the ninetieth percentile of the job's recent peaks, or before
+            GitHub hands it a job, the median of its pool's; its limit where neither is known.
+        limit_growth_mb:
+          type: integer
+          format: int64
+          description: The most any one of those runners may grow past that to its limit.
     JoinToken:
       type: object
       properties:

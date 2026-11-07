@@ -734,6 +734,11 @@ var registry = buildRegistry([]Setting{
 		Summary: "What a runner is booked for where memory is overcommitted. History books it at what its job is known to use (the ninetieth percentile of the job's recent peaks plus the booking headroom, or before its job is known the larger of its pool's figure and the heaviest job waiting), never above its size, and at its size where fewer than five runs are known. Typed books every runner at its size.",
 	},
 	{
+		Key: "scheduler.memory_admission", Label: "Memory admission", Env: "ZOOMIES_MEMORY_ADMISSION", Kind: KindEnum, Scope: ScopeInstance, Live: true,
+		Choices: []string{"measured", "booked"},
+		Summary: "What decides whether a host has memory for one more runner where memory is overcommitted. Booked starts one where the booking ceiling has room for it and its start charge is measured free. Measured starts it there too, and also where the booking is full but the measured free memory covers its start charge and the growth guard: what every runner on the machine may still grow by to what its job typically peaks at, plus the most one of them may grow past that to its limit. It never starts fewer runners than booked. A runner's limit, the reserve, the pressure holds and the CPU holds are the same either way.",
+	},
+	{
 		Key: "scheduler.memory_booking_headroom_percent", Label: "Memory booking headroom", Env: "ZOOMIES_MEMORY_BOOKING_HEADROOM_PERCENT", Kind: KindInt, Scope: ScopeInstance, Live: true,
 		Summary: "How much more than the ninetieth percentile of a job's recent peaks a runner is booked for under history booking, in percent (0-100).",
 	},

@@ -3550,6 +3550,20 @@
       "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
     },
     {
+      "id": "scheduler.memory_admission",
+      "kind": "problem",
+      "title": "scheduler.memory_admission",
+      "category": "configuration",
+      "severity": "error",
+      "detection": "static",
+      "detects": "Use `measured` or `booked`.",
+      "fix": "Use `measured` or `booked`.",
+      "verify": null,
+      "setting": "scheduler.memory_admission",
+      "docs_html": "https://zoomies.sh/problem-codes/#configuration-the-scheduler-and-the-rest",
+      "docs_md": "https://github.com/eyupio/zoomies/blob/main/docs/problem-codes.md#configuration-the-scheduler-and-the-rest"
+    },
+    {
       "id": "scheduler.memory_booking",
       "kind": "problem",
       "title": "scheduler.memory_booking",

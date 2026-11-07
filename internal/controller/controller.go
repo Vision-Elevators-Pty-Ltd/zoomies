@@ -118,8 +118,14 @@ type Options struct {
 // Controller owns the control plane's moving parts and their lifecycles.
 type Controller struct {
 	transferDraining atomic.Bool
-	doctor           *hosttune.Monitor
-	aiContextChecks  chan struct{}
+	// startCharges is what each runner this controller created was charged
+	// against its host's measured free memory when it was placed, by runner
+	// ID (start_charges.go). In memory: a restart forgets it, and the
+	// scheduler then charges a pending runner its whole size.
+	startChargesMu  sync.Mutex
+	startCharges    map[string]recordedCharge
+	doctor          *hosttune.Monitor
+	aiContextChecks chan struct{}
 	// aiContextRuns remembers, per repository, which commit the controller has
 	// been waiting on the managed workflow for and how often it has started it.
 	// It lives in memory on purpose: forgetting it on a restart costs at most one
@@ -1118,6 +1124,7 @@ func (c *Controller) policy() scheduler.Policy {
 		StartChargePercent:           c.cfg().Scheduler.StartChargePercent,
 		MemoryBooking:                c.cfg().Scheduler.MemoryBooking,
 		MemoryBookingHeadroomPercent: c.cfg().Scheduler.MemoryBookingHeadroomPercent,
+		MemoryAdmission:              c.cfg().Scheduler.MemoryAdmission,
 		MachineLabel:                 c.cfg().Scheduler.MachineLabel,
 		HistoryRaise:                 c.cfg().Scheduler.HistoryRaise,
 		MaxRunnerLifetime:            c.cfg().Scheduler.MaxRunnerLifetime,

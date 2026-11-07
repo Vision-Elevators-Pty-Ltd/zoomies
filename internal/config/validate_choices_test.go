@@ -18,6 +18,7 @@ var validatedEnums = map[string]func(c *Config, v string){
 	"scheduler.history_raise":          func(c *Config, v string) { c.Scheduler.HistoryRaise = v },
 	"scheduler.host_order":             func(c *Config, v string) { c.Scheduler.HostOrder = v },
 	"scheduler.memory_booking":         func(c *Config, v string) { c.Scheduler.MemoryBooking = v },
+	"scheduler.memory_admission":       func(c *Config, v string) { c.Scheduler.MemoryAdmission = v },
 	"scheduler.placement_mode":         func(c *Config, v string) { c.Scheduler.PlacementMode = v },
 	"scheduler.size_routing":           func(c *Config, v string) { c.Scheduler.SizeRouting = v },
 	"scheduler.auto_pools":             func(c *Config, v string) { c.Scheduler.AutoPools = v },
@@ -123,6 +124,7 @@ func TestTheRegistryChoicesAreTheOnesTheSchedulerAndStoreDefine(t *testing.T) {
 	}
 	sameSet("scheduler.host_order", scheduler.HostOrders)
 	sameSet("scheduler.memory_booking", scheduler.BookingModes)
+	sameSet("scheduler.memory_admission", scheduler.AdmissionModes)
 	sameSet("scheduler.history_raise", scheduler.HistoryRaiseModes)
 	sameSet("scheduler.size_routing", scheduler.SizeModes)
 	sameSet("scheduler.auto_pools", scheduler.SizeModes)

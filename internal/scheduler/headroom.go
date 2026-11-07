@@ -44,7 +44,16 @@ func (hs *hostSet) score(h *store.Host, p *store.Pool) float64 {
 		dimensions++
 	}
 	if alloc.MemoryKnown && alloc.MemoryMB > 0 {
-		score += float64(max(left.MemoryMB-want.MemoryMB, 0)) / float64(alloc.MemoryMB)
+		mem := float64(max(left.MemoryMB-want.MemoryMB, 0)) / float64(alloc.MemoryMB)
+		if hs.measuredOnly(h.ID) {
+			// Admitted on its measurement, a host's booking still says how much
+			// of it its runners' histories may yet claim: half the memory score
+			// is the measured room and half the booked room, so of two hosts
+			// with the same free memory the one booked less takes the start.
+			booked := float64(max(hs.bookedMemory[h.ID]-want.MemoryMB, 0)) / float64(alloc.MemoryMB)
+			mem = (mem + min(booked, 1)) / 2
+		}
+		score += mem
 		dimensions++
 	}
 	if dimensions > 0 {

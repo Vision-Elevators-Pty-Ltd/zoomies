@@ -27,6 +27,38 @@ const (
 // BookingModes is every value scheduler.memory_booking takes.
 var BookingModes = []string{BookingHistory, BookingTyped}
 
+// The modes of scheduler.memory_admission: what decides whether a host in the
+// overcommitted ledger (memory overcommit above 100, a fresh sample) has
+// memory for one more runner.
+const (
+	// AdmissionMeasured admits a start on the machine's measured free memory:
+	// its sampled available memory, less the starts that sample cannot contain
+	// yet, the reserve and the largest growth still to come of any one runner
+	// on it (the growth guard, HostBooking.GrowthReserveMB), must cover the
+	// start's charge. What the runners are booked for no longer refuses a
+	// start: it orders the hosts that have room. A start the booked rule
+	// below admits is admitted too, so measured admission never takes fewer
+	// starts than booked admission did.
+	//
+	// The booking sums each runner's ninetieth-percentile peak, and runners
+	// rarely peak together: on 6 November ci-nl-02 refused 138 starts with
+	// 140-163 GB of its 163 GB ceiling booked while its 62 GB of memory had
+	// 9-25 GB in use, at about half its CPU.
+	AdmissionMeasured = "measured"
+	// AdmissionBooked also holds every start to the booking ceiling: the
+	// machine's allocatable memory times the overcommit, against what every
+	// runner on it is booked for. The behaviour of 1.4.1-vision.8 and before.
+	AdmissionBooked = "booked"
+)
+
+// AdmissionModes is every value scheduler.memory_admission takes.
+var AdmissionModes = []string{AdmissionMeasured, AdmissionBooked}
+
+// admitByMeasure reports whether the policy admits starts on the measured
+// free memory alone (scheduler.memory_admission=measured). Anything else, the
+// zero value included, keeps the booking ceiling.
+func (p Policy) admitByMeasure() bool { return p.MemoryAdmission == AdmissionMeasured }
+
 const (
 	// BookingMinSamples is the fewest measured runs a booking is taken from.
 	// Fewer, and the runner is booked at its whole size: one or two runs say
@@ -288,6 +320,17 @@ type HostBooking struct {
 	// is booked past the machine and the host had a fresh sample. Otherwise the
 	// host is booked its runners' whole sizes against its own allocatable memory.
 	Overcommitted bool `json:"overcommitted"`
+	// Admission is scheduler.memory_admission. Measured, on an overcommitted
+	// host, admits a start on the measured free memory alone and reads the
+	// booking only to order hosts; booked also holds it to the ceiling.
+	Admission string `json:"admission,omitempty"`
+	// GrowthReserveMB is the most any one live runner on this host (on its
+	// machine, for an agent sharing one) may still grow by: what it is booked
+	// for less what it was last measured using. Under measured admission it is
+	// held back from the measured free memory with the reserve, so a start
+	// never takes the memory the heaviest job already running is about to
+	// need.
+	GrowthReserveMB int64 `json:"growth_reserve_mb,omitempty"`
 }
 
 // bookingTotals adds up what the live runners on each host are booked for and
@@ -320,6 +363,9 @@ func bookingTotals(hosts []*store.Host, pools []*store.Pool, runners map[string]
 			t := out[h.ID]
 			t.BookedMemoryMB += booked
 			t.TypedMemoryMB += charge
+			// What it may still grow by: a runner booked for more than it is
+			// using now can take that much more of the machine without a start.
+			t.GrowthReserveMB = max(t.GrowthReserveMB, booked-r.MemoryBytes>>20)
 			switch basis {
 			case basisTyped:
 			case basisRaised:

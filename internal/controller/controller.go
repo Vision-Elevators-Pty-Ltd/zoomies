@@ -1118,6 +1118,7 @@ func (c *Controller) policy() scheduler.Policy {
 		StartChargePercent:           c.cfg().Scheduler.StartChargePercent,
 		MemoryBooking:                c.cfg().Scheduler.MemoryBooking,
 		MemoryBookingHeadroomPercent: c.cfg().Scheduler.MemoryBookingHeadroomPercent,
+		MemoryAdmission:              c.cfg().Scheduler.MemoryAdmission,
 		MachineLabel:                 c.cfg().Scheduler.MachineLabel,
 		HistoryRaise:                 c.cfg().Scheduler.HistoryRaise,
 		MaxRunnerLifetime:            c.cfg().Scheduler.MaxRunnerLifetime,

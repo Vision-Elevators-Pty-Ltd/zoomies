@@ -940,6 +940,16 @@ type Scheduler struct {
 	// pressure holds and throttling are the same either way.
 	MemoryBooking                string `yaml:"memory_booking"`
 	MemoryBookingHeadroomPercent int    `yaml:"memory_booking_headroom_percent"`
+	// MemoryAdmission is measured or booked: what decides whether an
+	// overcommitted host with a fresh sample has memory for one more runner.
+	// Measured admits it on the host's measured free memory, less the
+	// reserve, the starts the sample cannot contain yet and the most any one
+	// runner already there may still grow by; the booking only orders hosts.
+	// It also admits whatever booked would, so it never admits fewer.
+	// Booked also holds it to the booking ceiling, as before the setting
+	// existed. Either way the runner's limit, the reserve, the pressure holds
+	// and the CPU holds are unchanged.
+	MemoryAdmission string `yaml:"memory_admission"`
 	// MachineLabel names the host label whose value says which machine an agent
 	// is on. Agents with the same value share one memory ceiling (the
 	// machine's booking memory once, against every runner on it) and one
@@ -1335,7 +1345,11 @@ func Default() *Config {
 			// overcommitted, so at the default of 100 they change nothing.
 			MemoryBooking:                "history",
 			MemoryBookingHeadroomPercent: 25,
-			MachineLabel:                 "host",
+			// Measured, because the booking sums every runner's peak and the
+			// measurement is what the machine really has; it acts only where
+			// memory is overcommitted, so at the default of 100 nothing changes.
+			MemoryAdmission: "measured",
+			MachineLabel:    "host",
 			// Everything about size classes is off until an operator turns it
 			// on, and the figures below are what it does when they do. They are
 			// held equal to scheduler.DefaultSizeConfig by a test in the

@@ -11176,6 +11176,16 @@ export interface components {
             machine_ceiling_mb?: number;
             /** @description Whether this ledger is the one the pass placed by: memory is overcommitted and the host had a fresh sample. Otherwise the host is booked its runners' sizes against its own allocatable memory. */
             overcommitted: boolean;
+            /**
+             * @description `scheduler.memory_admission`. Measured admits a start on this overcommitted host on its measured free memory, less the reserve, the pending starts and `growth_reserve_mb`, or wherever booked admission would; the booking then only orders hosts. Booked also refuses a start once the machine is booked to its ceiling.
+             * @enum {string}
+             */
+            admission?: "measured" | "booked";
+            /**
+             * Format: int64
+             * @description The growth guard: the most any one live runner on this host's machine may still grow by, what it is booked for less what it was last measured using. Held back from the measured free memory under measured admission.
+             */
+            growth_reserve_mb?: number;
         };
         JoinToken: {
             id?: string;

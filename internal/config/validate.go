@@ -1046,6 +1046,7 @@ func (c *Config) validateScheduler(add func(Finding)) {
 		})
 	}
 	c.refuseUnknownChoice(add, Finding{Code: "scheduler.memory_booking", Severity: SeverityError, Setting: "scheduler.memory_booking", Title: "unknown memory booking mode"}, c.Scheduler.MemoryBooking)
+	c.refuseUnknownChoice(add, Finding{Code: "scheduler.memory_admission", Severity: SeverityError, Setting: "scheduler.memory_admission", Title: "unknown memory admission mode"}, c.Scheduler.MemoryAdmission)
 	if c.Scheduler.MemoryBookingHeadroomPercent < 0 || c.Scheduler.MemoryBookingHeadroomPercent > 100 {
 		add(Finding{
 			Code: "scheduler.memory_booking_headroom_percent", Severity: SeverityError, Setting: "scheduler.memory_booking_headroom_percent",

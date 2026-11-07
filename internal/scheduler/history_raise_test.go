@@ -306,7 +306,7 @@ func TestARaisedRunnerIsBookedAtWhatItMayGrowTo(t *testing.T) {
 	if got, _, basis := b.runner(p, h, r); got != typecheckNeed || basis != basisRaised {
 		t.Fatalf("lent 2 GB, the raised runner books %d (%s)", got, basis)
 	}
-	totals := bookingTotals([]*store.Host{h}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: {r}}, b, nil, 100)
+	totals := bookingTotals([]*store.Host{h}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: {r}}, b, nil, 100, nil)
 	if hb := totals[h.ID]; hb.RaisedByHistory != 1 || hb.BookedMemoryMB != typecheckNeed {
 		t.Fatalf("the host books %+v, want one runner raised by history at %d", hb, typecheckNeed)
 	}

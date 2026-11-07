@@ -3,6 +3,7 @@ package scheduler
 import (
 	"math"
 	"slices"
+	"time"
 
 	"github.com/eyupio/zoomies/internal/store"
 )
@@ -419,7 +420,14 @@ type HostBooking struct {
 // typed at, and the growth guard's two parts, by host ID, in one pass over the
 // fleet. charges and pct are the start charges recorded for runners still
 // pending (nil for none) and the start charge percentage.
-func bookingTotals(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, b *booker, charges map[string]Reservation, pct int64) map[string]*HostBooking {
+//
+// samples is, by host ID, the sample a runner on that host is judged pending
+// against: for an agent sharing a machine, the machine's one sample
+// (machineSamples), which is also what its measurement is charged against;
+// a host absent from it is judged against its own. Growth and the
+// measurement must agree about which runners the sample already contains,
+// or a runner counted as using its start charge here is charged nowhere.
+func bookingTotals(hosts []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner, b *booker, charges map[string]Reservation, pct int64, samples map[string]*store.Host) map[string]*HostBooking {
 	out := make(map[string]*HostBooking, len(hosts))
 	byID := make(map[string]*store.Host, len(hosts))
 	for _, h := range hosts {
@@ -454,7 +462,11 @@ func bookingTotals(hosts []*store.Host, pools []*store.Pool, runners map[string]
 			// charged.
 			peak, limit := b.expected(p, h, r)
 			using := r.MemoryBytes >> 20
-			if pendingOn(h, r) {
+			sample := h
+			if s, ok := samples[h.ID]; ok {
+				sample = s
+			}
+			if pendingOn(sample, r) {
 				if c, ok := charges[r.ID]; ok {
 					using = min(c.MemoryMB, charge)
 				} else if charges == nil {
@@ -545,4 +557,39 @@ func pendingAgainst(hs []*store.Host, pools []*store.Pool, runners map[string][]
 		}
 	}
 	return out, charged
+}
+
+// machineSample is the one sample a machine of several agents is measured
+// by: the lowest available memory any of its agents sampled freshly, with the
+// agents that have such a sample. Nil where none has.
+func machineSample(members []*store.Host, now time.Time) (fresh []*store.Host, sample *store.Host) {
+	for _, h := range members {
+		if !h.Usage.Fresh(now) || h.Usage.MemoryAvailableMB == nil {
+			continue
+		}
+		fresh = append(fresh, h)
+		if sample == nil || *h.Usage.MemoryAvailableMB < *sample.Usage.MemoryAvailableMB {
+			sample = h
+		}
+	}
+	return fresh, sample
+}
+
+// machineSamples is, by host ID, the machine sample (machineSample) each agent
+// of a machine group is measured by, for every group that has one.
+func machineSamples(groups map[string][]*store.Host, now time.Time) map[string]*store.Host {
+	var out map[string]*store.Host
+	for _, members := range groups {
+		_, sample := machineSample(members, now)
+		if sample == nil {
+			continue
+		}
+		if out == nil {
+			out = map[string]*store.Host{}
+		}
+		for _, h := range members {
+			out[h.ID] = sample
+		}
+	}
+	return out
 }

@@ -1345,10 +1345,13 @@ func Default() *Config {
 			// overcommitted, so at the default of 100 they change nothing.
 			MemoryBooking:                "history",
 			MemoryBookingHeadroomPercent: 25,
-			// Measured, because the booking sums every runner's peak and the
-			// measurement is what the machine really has; it acts only where
-			// memory is overcommitted, so at the default of 100 nothing changes.
-			MemoryAdmission: "measured",
+			// Booked. Measured admits only what its aggregate growth guard
+			// proves safe beyond the booking, which a replay of 6 Nov 2026 put
+			// at none of the starts the booking refused on the 62 GB machines;
+			// it stays an operator's choice until that guard has run in
+			// production. Either way the start charges a pass records and the
+			// reduced-size admission check apply.
+			MemoryAdmission: "booked",
 			MachineLabel:    "host",
 			// Everything about size classes is off until an operator turns it
 			// on, and the figures below are what it does when they do. They are

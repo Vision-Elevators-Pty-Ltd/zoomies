@@ -1673,7 +1673,7 @@ func newHostSetFrom(hosts []*store.Host, pools []*store.Pool, runners map[string
 	var booked map[string]*HostBooking
 	if overcommit {
 		hs.book = opts.book
-		booked = bookingTotals(hs.hosts, pools, runners, opts.book, opts.startCharges, pct)
+		booked = bookingTotals(hs.hosts, pools, runners, opts.book, opts.startCharges, pct, machineSamples(groups, now))
 		hs.bookings = booked
 		if opts.admitByMeasure {
 			hs.byMeasure = true
@@ -1792,18 +1792,8 @@ func newHostSetFrom(hosts []*store.Host, pools []*store.Pool, runners map[string
 // runners still count against the machine.
 func (hs *hostSet) shareMachine(machine string, members []*store.Host, pools []*store.Pool, runners map[string][]*store.Runner,
 	overcommit bool, overcommitPercent int, pct int64, booked map[string]*HostBooking) {
-	var fresh []*store.Host
-	var sample *store.Host
-	for _, h := range members {
-		if !h.Usage.Fresh(hs.now) || h.Usage.MemoryAvailableMB == nil {
-			continue
-		}
-		fresh = append(fresh, h)
-		if sample == nil || *h.Usage.MemoryAvailableMB < *sample.Usage.MemoryAvailableMB {
-			sample = h
-		}
-	}
-	if len(fresh) == 0 {
+	fresh, sample := machineSample(members, hs.now)
+	if sample == nil {
 		return
 	}
 	// One measurement: the lowest any agent sampled, less every start on the

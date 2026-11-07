@@ -439,3 +439,103 @@ func TestMemoryAdmissionIsAKillSwitchThroughThePolicy(t *testing.T) {
 		}
 	}
 }
+
+// staggered is a machine of two agents whose samples were taken 20 seconds
+// apart, with six idle 32 GB runners on `on`, no use measured yet, two of them
+// started 10 seconds ago: between the two samples. Their pool's median run is
+// 2 GB, and a heavy job waiting books each of them whole, so the booking is
+// full and only the measured rule can admit. older and newer are the free
+// memory past the reserve each agent sampled.
+func staggered(t *testing.T, olderFree, newerFree int64, onNewer bool, charges map[string]Reservation) (*hostSet, *store.Pool, *store.Host, *store.Host) {
+	t.Helper()
+	p := browserPool()
+	p.Resources.CPUs = 1
+	older := nlAgent("older-agent", "machine", 0)
+	newer := nlAgent("newer-agent", "machine", 0)
+	of, nf := older.MemoryReserve()+olderFree, newer.MemoryReserve()+newerFree
+	older.Usage.MemoryAvailableMB, newer.Usage.MemoryAvailableMB = &of, &nf
+	older.Usage.SampledAt = now.Add(-20 * time.Second)
+	newer.Usage.SampledAt = now
+	on := older
+	if onNewer {
+		on = newer
+	}
+	var rs []*store.Runner
+	for i := range 6 {
+		r := idleOn("r"+string(rune('a'+i)), p, on, 0)
+		if i < 2 {
+			r.CreatedAt = now.Add(-10 * time.Second)
+			started := r.CreatedAt
+			r.ContainerStartedAt = &started
+		}
+		rs = append(rs, r)
+	}
+	history := map[store.JobUsageKey][]store.JobPeak{key("heavy", p): peaksOf(20, 26*gb)}
+	in := &BookingInputs{PoolRuns: map[string][]store.JobPeak{p.ID: peaksOf(100, 2*gb)}}
+	waiting := &store.Job{Repo: key("heavy", p).Repo, Workflow: "PR", JobName: "heavy", State: store.JobQueued}
+	b := newBooker(BookingHistory, 25, in, history, []*store.Pool{p}, map[string][]*store.Job{p.ID: {waiting}})
+	hs := newHostSetFrom([]*store.Host{older, newer}, []*store.Pool{p}, map[string][]*store.Runner{p.ID: rs}, now,
+		ledger{overcommitPercent: 300, cpuOvercommitPercent: 400, startChargePercent: 30, book: b, machineLabel: "host",
+			admitByMeasure: true, startCharges: charges})
+	return hs, p, older, newer
+}
+
+func chargesFor(ids ...string) map[string]Reservation {
+	out := map[string]Reservation{}
+	for _, id := range ids {
+		out[id] = Reservation{CPUs: 0.3, MemoryMB: startCharge(32*gb, 0, 30)}
+	}
+	return out
+}
+
+// Review 2, major: growth is judged against the same sample as the machine's
+// measurement. The runners started between the samples are on the agent with
+// the older sample, and the newer, lower sample is the machine's: it already
+// contains them, so they are charged nothing and must be counted as using what
+// they were measured using (nothing), not their start charge. Every runner may
+// then still grow to the 2 GB median, and one on to 32 GB: 6 x 2 + 30 = 42 GB.
+// Counting the two at their charge reserved 38 GB and admitted a 32 GB start
+// 3.6 GB short. With or without a record of their charges (a restart, or one
+// past its 30 minutes), the answer is the same.
+func TestGrowthIsJudgedAgainstTheMachinesSampleWhenItIsTheNewer(t *testing.T) {
+	for _, charges := range []map[string]Reservation{chargesFor("ra", "rb", "rc", "rd", "re", "rf"), {}} {
+		hs, p, older, newer := staggered(t, 55*gb, 48*gb, false, charges)
+		want := int64(6*2*gb + 30*gb)
+		if hs.guard(newer.ID) != want || hs.guard(older.ID) != want {
+			t.Fatalf("records %d: guard %d / %d MB, want %d on both agents", len(charges), hs.guard(older.ID), hs.guard(newer.ID), want)
+		}
+		if hs.measuredMemory[newer.ID] != 48*gb-want {
+			t.Fatalf("records %d: measurement %d MB, want 48 GB less the guard and no pending charge", len(charges), hs.measuredMemory[newer.ID])
+		}
+		if got := hs.placeAvoiding(p, 1, nil); len(got) != 0 {
+			t.Fatalf("records %d: a 32 GB start was admitted with the guard %d MB past free memory", len(charges), want+startCharge(32*gb, 0, 30)-48*gb)
+		}
+	}
+}
+
+// The other direction: the older sample is the machine's, and the two runners,
+// on the agent with the newer sample, started after it. The measurement is
+// charged their start charge (recorded) or, with no record, their whole size,
+// and growth counts them as already using that much, so nothing is reserved
+// twice: the four older runners grow 2 GB each, the two charged 9.6 GB grow
+// nothing past their charge, and one runner goes on to its 32 GB limit.
+func TestGrowthIsJudgedAgainstTheMachinesSampleWhenItIsTheOlder(t *testing.T) {
+	charge := startCharge(32*gb, 0, 30)
+	for _, tc := range []struct {
+		charges map[string]Reservation
+		pending int64
+	}{
+		{chargesFor("ra", "rb"), 2 * charge},
+		{map[string]Reservation{}, 2 * 32 * gb},
+	} {
+		hs, _, older, newer := staggered(t, 48*gb, 55*gb, true, tc.charges)
+		want := int64(4*2*gb + 30*gb)
+		if hs.guard(older.ID) != want || hs.guard(newer.ID) != want {
+			t.Fatalf("records %d: guard %d / %d MB, want %d", len(tc.charges), hs.guard(older.ID), hs.guard(newer.ID), want)
+		}
+		// The guard is taken after the measurement's floor at zero.
+		if got := hs.measuredMemory[older.ID]; got != max(48*gb-tc.pending, 0)-want {
+			t.Fatalf("records %d: measurement %d MB, want 48 GB less %d MB pending (floored at zero) and the guard", len(tc.charges), got, tc.pending)
+		}
+	}
+}

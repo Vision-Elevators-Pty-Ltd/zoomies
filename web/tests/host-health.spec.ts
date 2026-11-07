@@ -891,12 +891,30 @@ test('an in-page link lands once, so moving away at once stays moved', async ({ 
 // browser has focused the row it scrolled to. A landing left to either of them
 // then arrived after the person had moved on and took focus back (CI, 7 Nov:
 // the row was focused by the browser and only marked as landed 40 ms later,
-// after the test had blurred it). Here both are held back 150 ms, and a link
-// to a check must still have landed, and finished, when the click returns.
+// after the test had blurred it). Here both are held from the click until the
+// test has moved away and lets them go: a link to a check must have landed in
+// its click, and nothing let go afterwards may land again.
 test('a link to a check lands in the click, so a slow machine cannot land it late', async ({
   page,
 }) => {
   await page.addInitScript(() => {
+    type Gate = {
+      held: boolean;
+      queue: Array<() => void>;
+      release: () => void;
+      frame: typeof requestAnimationFrame;
+    };
+    const raf = window.requestAnimationFrame.bind(window);
+    const gate: Gate = {
+      held: false,
+      queue: [],
+      frame: raf,
+      release() {
+        gate.held = false;
+        for (const run of gate.queue.splice(0)) run();
+      },
+    };
+    (window as unknown as { __landingGate: Gate }).__landingGate = gate;
     const add = window.addEventListener.bind(window);
     window.addEventListener = ((
       type: string,
@@ -904,13 +922,18 @@ test('a link to a check lands in the click, so a slow machine cannot land it lat
       opts?: unknown,
     ) => {
       if (type !== 'hashchange') return add(type, fn, opts as AddEventListenerOptions);
-      const call = (e: Event) =>
-        setTimeout(() => (typeof fn === 'function' ? fn(e) : fn.handleEvent(e)), 150);
+      const call = (e: Event) => {
+        const run = () => (typeof fn === 'function' ? fn(e) : fn.handleEvent(e));
+        if (gate.held) gate.queue.push(run);
+        else run();
+      };
       return add(type, call, opts as AddEventListenerOptions);
     }) as typeof window.addEventListener;
-    const raf = window.requestAnimationFrame.bind(window);
-    window.requestAnimationFrame = (fn: FrameRequestCallback) =>
-      window.setTimeout(() => raf(fn), 150) as unknown as number;
+    window.requestAnimationFrame = (fn: FrameRequestCallback) => {
+      if (!gate.held) return raf(fn);
+      gate.queue.push(() => raf(fn));
+      return 0;
+    };
   });
   const name = `health-late-${Date.now() % 1e6}`;
   const credentials = await enrol(page, name);
@@ -922,18 +945,30 @@ test('a link to a check lands in the click, so a slow machine cannot land it lat
     await heartbeat(page, credentials, [watches, disk]);
     await page.goto(`/hosts/${credentials.host_id}#disk.space`, { waitUntil: 'domcontentloaded' });
     await expect(page.locator('.health-content tr[id="disk.space"]')).toBeFocused();
+    // From here every hashchange and frame waits until the test lets it go.
+    await page.evaluate(() => {
+      (window as unknown as { __landingGate: { held: boolean } }).__landingGate.held = true;
+    });
     await page.locator('.health-content').getByRole('link', { name: 'File watches' }).click();
     const watchesRow = page.locator('.health-content tr[id="inotify.watches"]');
     await expect(watchesRow).toBeFocused();
-    // Not waited for: landed by the time the click returns, or not at all.
-    expect(await watchesRow.getAttribute('data-landed')).toBe('');
-    await page.evaluate(() => {
+    // Move away, then let everything that was held run, and give it two frames.
+    await page.evaluate(async () => {
+      const gate = (
+        window as unknown as {
+          __landingGate: { release: () => void; frame: typeof requestAnimationFrame };
+        }
+      ).__landingGate;
       (document.activeElement as HTMLElement | null)?.blur();
       window.scrollTo(0, 0);
+      gate.release();
+      await new Promise((done) => gate.frame(() => gate.frame(done)));
+      await new Promise((done) => setTimeout(done, 100));
     });
-    await page.waitForTimeout(600);
     expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('TR');
     expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    // And it did land, in the click: marked, at the link's hash.
+    expect(await watchesRow.getAttribute('data-landed')).toBe('');
     expect(new URL(page.url()).hash).toBe('#inotify.watches');
   } finally {
     await page.request.delete(`/api/v1/hosts/${credentials.host_id}?force=true`);

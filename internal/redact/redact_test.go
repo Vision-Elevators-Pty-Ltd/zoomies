@@ -1,9 +1,9 @@
 package redact
 
 import (
+	"fmt"
 	"strings"
 	"testing"
-	"time"
 )
 
 // Each shape a credential is known to take is found, and what surrounds it is left
@@ -115,36 +115,70 @@ func TestResultsAddUp(t *testing.T) {
 	}
 }
 
-// Hostile text cannot make redaction slow in the way that matters: the time taken
-// grows with the size of the text and not faster. It is checked by comparing a text
-// with one eight times its size, which holds on any machine and under the race
-// detector, where a fixed limit on seconds does not.
-func TestHostileTextTakesTimeInProportionToItsSize(t *testing.T) {
-	best := func(in string) time.Duration {
-		d := time.Duration(1<<63 - 1)
-		for i := 0; i < 2; i++ {
-			started := time.Now()
-			Text(in)
-			d = min(d, time.Since(started))
-		}
-		return max(d, 5*time.Millisecond)
+// hostileUnits are texts built to make a redaction rule work hard: each is
+// repeated to the size wanted, so that every rule that starts a match there
+// fails late, or never ends one.
+var hostileUnits = []struct{ name, unit string }{
+	{"plain text", "a"},
+	{"near misses of a key", "sk-"},
+	{"settings with no value", "password="},
+	{"key headers never ended", "-----BEGIN PRIVATE KEY-----"},
+	{"half an address", "a@"},
+	{"half a url", "http://a:"},
+	{"quotes never closed", `token="`},
+}
+
+// hostile is unit repeated to size bytes, or as near as whole units come.
+func hostile(unit string, size int) string {
+	return strings.Repeat(unit, max(size/len(unit), 1))
+}
+
+// Hostile text is redacted correctly: at 64 KB of each, every rule finishes,
+// the answer is stable, and redacting it again changes nothing.
+//
+// How long it takes is not asserted here. A wall-clock ratio inside the
+// race-enabled test run measured the scheduler, the garbage collector and the
+// other packages sharing the machine as much as the code, and failed correct
+// linear code once in seventeen CI runs (7 Nov 2026, "settings with no value",
+// 8 KB in 16 ms and 64 KB in 508 ms, against a 30x bound). The rules are Go
+// regular expressions, which RE2 keeps linear in the input; BenchmarkHostileText
+// is where the scaling is measured.
+func TestHostileTextIsRedactedCorrectlyAtAnySize(t *testing.T) {
+	for _, h := range hostileUnits {
+		t.Run(h.name, func(t *testing.T) {
+			in := hostile(h.unit, 64<<10)
+			once, _ := Text(in)
+			if once == "" {
+				t.Fatalf("%d bytes of %q redacted to nothing", len(in), h.unit)
+			}
+			again, _ := Text(in)
+			if again != once {
+				t.Fatal("the same text redacted two different ways")
+			}
+			if twice, res := Text(once); twice != once || res.Total() != 0 {
+				t.Fatalf("redacting the redacted text changed it (%+v)", res)
+			}
+		})
 	}
-	for name, unit := range map[string]string{
-		"plain text":              "a",
-		"near misses of a key":    "sk-",
-		"settings with no value":  "password=",
-		"key headers never ended": "-----BEGIN PRIVATE KEY-----",
-		"half an address":         "a@",
-		"half a url":              "http://a:",
-		"quotes never closed":     `token="`,
-	} {
-		small := strings.Repeat(unit, 8<<10/len(unit))
-		large := strings.Repeat(unit, 8*8<<10/len(unit))
-		ts, tl := best(small), best(large)
-		// Linear is eight times; the bound is a good deal more than that so that
-		// noise cannot fail it, and far less than what quadratic would take (64).
-		if tl > 30*ts {
-			t.Errorf("%s: %d bytes took %v and %d bytes took %v", name, len(small), ts, len(large), tl)
+}
+
+// BenchmarkHostileText measures redaction of each hostile text at 8 KB, 64 KB
+// and 512 KB. Linear code holds its throughput (the MB/s column) across the
+// three sizes; compare repeated runs with benchstat on a quiet machine:
+//
+//	go test -run '^$' -bench HostileText -count 10 ./internal/redact/ | tee new.txt
+//	benchstat old.txt new.txt
+func BenchmarkHostileText(b *testing.B) {
+	for _, h := range hostileUnits {
+		for _, size := range []int{8 << 10, 64 << 10, 512 << 10} {
+			in := hostile(h.unit, size)
+			b.Run(fmt.Sprintf("%s/%dKiB", h.name, size>>10), func(b *testing.B) {
+				b.SetBytes(int64(len(in)))
+				b.ReportAllocs()
+				for b.Loop() {
+					Text(in)
+				}
+			})
 		}
 	}
 }

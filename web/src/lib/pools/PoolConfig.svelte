@@ -58,7 +58,10 @@
 
   /* Only the timings this pool actually overrides. The rest follow the fleet,
      and a row per setting saying "the fleet's" would bury the two that do not. */
-  const OVERRIDE_LABELS: readonly { key: keyof RunnerSettings; label: string }[] = [
+  const OVERRIDE_LABELS: readonly {
+    key: Exclude<keyof RunnerSettings, 'shm_size_mb'>;
+    label: string;
+  }[] = [
     { key: 'provision_timeout', label: 'Provision timeout' },
     { key: 'drain_timeout', label: 'Drain timeout' },
     { key: 'max_runner_lifetime', label: 'Maximum lifetime' },
@@ -72,6 +75,14 @@
       const value = settings[key];
       if (value === undefined || value === null) continue;
       out.push({ label, value: formatGoDuration(value) || String(value) });
+    }
+    // A size in MB, not a duration; 0 is Docker's own /dev/shm.
+    const shm = settings.shm_size_mb;
+    if (typeof shm === 'number') {
+      out.push({
+        label: 'Shared memory',
+        value: shm === 0 ? "Docker's 64 MB" : `${formatNumber(shm)} MB`,
+      });
     }
     return out;
   });

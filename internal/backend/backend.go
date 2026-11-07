@@ -322,6 +322,12 @@ type Spec struct {
 	RunAsRoot bool `json:"run_as_root"`
 	// Network is an optional container network to attach to.
 	Network string `json:"network,omitempty"`
+	// ShmSizeMB is the size of the runner container's /dev/shm, in MB: the
+	// pool's runner_settings.shm_size_mb, or else runners.shm_size_mb, as the
+	// controller resolved it. Zero, which is also what a controller older than
+	// the field sends, leaves the engine's own 64 MB. It is held to the
+	// runner's memory limit, which its pages are charged to.
+	ShmSizeMB int64 `json:"shm_size_mb,omitempty"`
 	// WorkDir is the host directory this runner may use as scratch space.
 	WorkDir string `json:"work_dir,omitempty"`
 	// RunnerVersion pins the actions/runner release for the process backend,

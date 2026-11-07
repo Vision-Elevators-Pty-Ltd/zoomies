@@ -133,3 +133,13 @@ func withBuildSizing(env map[string]string, n int) map[string]string {
 	}
 	return env
 }
+
+// shmSizeMB is the /dev/shm a runner of pool is created with, in MB: the
+// pool's runner_settings.shm_size_mb where it sets one, zero included (which
+// leaves the engine's own 64 MB), or else the fleet's runners.shm_size_mb.
+func shmSizeMB(r config.Runners, pool *store.Pool) int64 {
+	if pool != nil && pool.RunnerSettings.ShmSizeMB != nil {
+		return max(*pool.RunnerSettings.ShmSizeMB, 0)
+	}
+	return max(r.ShmSizeMB, 0)
+}

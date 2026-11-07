@@ -203,6 +203,30 @@ type runnerSettingsIn struct {
 	MaxRunnerLifetime optionalDuration `json:"max_runner_lifetime"`
 	ScaleUpDelay      optionalDuration `json:"scale_up_delay"`
 	DockerWait        optionalDuration `json:"docker_wait"`
+	// ShmSizeMB is a whole number of MB rather than a duration: absent, null
+	// and a number mean what they mean for the timings, and 0 is a real
+	// answer, Docker's own 64 MB.
+	ShmSizeMB optionalMB `json:"shm_size_mb"`
+}
+
+// optionalMB is optionalDuration for a whole number of MB.
+type optionalMB struct {
+	present bool
+	value   *int64
+}
+
+func (o *optionalMB) UnmarshalJSON(b []byte) error {
+	o.present = true
+	if string(b) == "null" {
+		o.value = nil
+		return nil
+	}
+	var v int64
+	if err := json.Unmarshal(b, &v); err != nil {
+		return fmt.Errorf("shm_size_mb must be a whole number of MB or null")
+	}
+	o.value = &v
+	return nil
 }
 
 // apply folds the overrides that arrived into the pool's, reporting the
@@ -210,6 +234,17 @@ type runnerSettingsIn struct {
 // request used, so the wizard can put the message under the input that
 // carried it.
 func (in *runnerSettingsIn) apply(rs *store.RunnerSettings, add func(field, msg string)) {
+	if in.ShmSizeMB.present {
+		switch v := in.ShmSizeMB.value; {
+		case v == nil:
+			rs.ShmSizeMB = nil // null: follow runners.shm_size_mb
+		case *v < 0 || *v > config.MaxShmSizeMB:
+			add("runner_settings.shm_size_mb", fmt.Sprintf("use 0-%d MB; 0 leaves Docker's own 64 MB", config.MaxShmSizeMB))
+		default:
+			mb := *v
+			rs.ShmSizeMB = &mb
+		}
+	}
 	each := []struct {
 		name string
 		in   optionalDuration
@@ -526,6 +561,9 @@ type poolDefaultTimings struct {
 	// was configured: zero in the setting means the runner image chooses, and
 	// the image waits two minutes.
 	DockerWait string `json:"docker_wait"`
+	// ShmSizeMB is runners.shm_size_mb: the /dev/shm a runner gets in MB, 0
+	// for Docker's own 64 MB.
+	ShmSizeMB int64 `json:"shm_size_mb"`
 }
 
 // handlePoolDefaults answers GET /api/v1/pools/defaults.
@@ -544,6 +582,7 @@ func (s *Server) handlePoolDefaults(w http.ResponseWriter, _ *http.Request) {
 			MaxRunnerLifetime: cfg.Scheduler.MaxRunnerLifetime.String(),
 			ScaleUpDelay:      cfg.Scheduler.ScaleUpDelay.String(),
 			DockerWait:        cfg.Runners.EffectiveDockerWait().String(),
+			ShmSizeMB:         cfg.Runners.ShmSizeMB,
 		},
 	})
 }

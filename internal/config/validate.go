@@ -79,6 +79,15 @@ const MaxQuietHeartbeatInterval = HostUnhealthyAfter / 2
 // be told without being one.
 var euid = os.Geteuid
 
+// DefaultShmSizeMB is runners.shm_size_mb unset: 2 GB of /dev/shm in a runner
+// container, enough for a browser's shared memory.
+const DefaultShmSizeMB = 2048
+
+// MaxShmSizeMB is the largest /dev/shm a runner container may be given, for
+// the fleet or one pool: 64 GB. It is a ceiling on a tmpfs, not a
+// reservation, but a figure past any CI machine's memory is a typing mistake.
+const MaxShmSizeMB = 64 * 1024
+
 // MaxDockerWait is the longest runners.docker_wait the runner image accepts.
 // The entrypoint refuses anything past 3600 seconds, and a value it refuses
 // starts no runner.
@@ -932,6 +941,13 @@ func (c *Config) validateAgent(add func(Finding)) {
 
 // validateRunners checks the runners' own settings, and the warning for running them as root.
 func (c *Config) validateRunners(add func(Finding)) {
+	if c.Runners.ShmSizeMB < 0 || c.Runners.ShmSizeMB > MaxShmSizeMB {
+		add(Finding{
+			Code: "runners.shm_size_mb", Severity: SeverityError, Setting: "runners.shm_size_mb",
+			Title: fmt.Sprintf("runners.shm_size_mb is %d, outside 0-%d", c.Runners.ShmSizeMB, MaxShmSizeMB),
+			Fix:   "use 2048 for room for a browser's shared memory, or 0 to leave Docker's 64 MB.",
+		})
+	}
 	if c.Runners.DockerWait < 0 || c.Runners.DockerWait > MaxDockerWait {
 		// The runner image refuses anything outside 1..3600 seconds with a
 		// configuration exit, so a value it would refuse is a fleet whose

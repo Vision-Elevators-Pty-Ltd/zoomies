@@ -119,3 +119,29 @@ func TestAPoolsOwnDockerWaitWinsOverTheFleets(t *testing.T) {
 		t.Fatalf("docker wait = %q, want the pool env's 600", got)
 	}
 }
+
+// A runner's /dev/shm is the pool's override where it makes one, zero
+// included, and the fleet's runners.shm_size_mb otherwise.
+func TestShmSizeIsThePoolsOverrideOrTheFleets(t *testing.T) {
+	fleet := config.Default().Runners
+	if fleet.ShmSizeMB != 2048 {
+		t.Fatalf("runners.shm_size_mb defaults to %d, want 2048", fleet.ShmSizeMB)
+	}
+	pool := &store.Pool{}
+	if got := shmSizeMB(fleet, pool); got != 2048 {
+		t.Fatalf("a pool that sets nothing gets %d MB, want the fleet's 2048", got)
+	}
+	zero, big := int64(0), int64(4096)
+	pool.RunnerSettings.ShmSizeMB = &zero
+	if got := shmSizeMB(fleet, pool); got != 0 {
+		t.Fatalf("a pool that set 0 gets %d MB, want 0 (Docker's own 64 MB)", got)
+	}
+	pool.RunnerSettings.ShmSizeMB = &big
+	if got := shmSizeMB(fleet, pool); got != 4096 {
+		t.Fatalf("a pool that set 4096 gets %d MB", got)
+	}
+	fleet.ShmSizeMB = 0
+	if got := shmSizeMB(fleet, &store.Pool{}); got != 0 {
+		t.Fatalf("with the fleet at 0 a pool gets %d MB, want 0", got)
+	}
+}

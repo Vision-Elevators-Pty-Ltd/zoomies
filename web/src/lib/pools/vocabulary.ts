@@ -226,6 +226,7 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   'runner_settings.max_runner_lifetime': 'Maximum runner lifetime',
   'runner_settings.scale_up_delay': 'Scale-up delay',
   'runner_settings.docker_wait': 'Docker wait',
+  'runner_settings.shm_size_mb': 'Shared memory size',
 };
 
 /**

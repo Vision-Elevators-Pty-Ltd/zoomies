@@ -130,3 +130,45 @@ func TestAnUnreadableOverrideNamesItsField(t *testing.T) {
 		})
 	}
 }
+
+// shm_size_mb is a number of MB with the same three states as the timings:
+// absent keeps it, null hands it back to runners.shm_size_mb, and 0 is a real
+// answer, Docker's own 64 MB. A negative size is refused.
+func TestAPoolsShmSizeSurvivesTheRoundTrip(t *testing.T) {
+	h := newHarness(t)
+	inst := h.installation()
+	u, _ := h.user("operator", store.RoleOperator)
+	cookie := h.session(u)
+
+	body := poolBody(inst.ID)
+	body["runner_settings"] = map[string]any{"shm_size_mb": 4096}
+	res := h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body})
+	res.mustStatus(t, http.StatusCreated, "create")
+	var created controller.PoolView
+	res.into(t, &created)
+	if v := created.RunnerSettings.ShmSizeMB; v == nil || *v != 4096 {
+		t.Fatalf("shm_size_mb = %v, want 4096", v)
+	}
+
+	res = h.do(request{method: http.MethodPatch, path: "/api/v1/pools/" + created.ID,
+		cookie: cookie, body: map[string]any{"runner_settings": map[string]any{"shm_size_mb": 0}}})
+	res.mustStatus(t, http.StatusOK, "patch zero")
+	var zero controller.PoolView
+	res.into(t, &zero)
+	if v := zero.RunnerSettings.ShmSizeMB; v == nil || *v != 0 {
+		t.Fatalf("an explicit 0 became %v; it is Docker's own 64 MB, not the fleet's", v)
+	}
+
+	res = h.do(request{method: http.MethodPatch, path: "/api/v1/pools/" + created.ID,
+		cookie: cookie, body: map[string]any{"runner_settings": map[string]any{"shm_size_mb": nil}}})
+	res.mustStatus(t, http.StatusOK, "patch null")
+	var cleared controller.PoolView
+	res.into(t, &cleared)
+	if cleared.RunnerSettings.ShmSizeMB != nil {
+		t.Fatalf("null left shm_size_mb at %d", *cleared.RunnerSettings.ShmSizeMB)
+	}
+
+	res = h.do(request{method: http.MethodPatch, path: "/api/v1/pools/" + created.ID,
+		cookie: cookie, body: map[string]any{"runner_settings": map[string]any{"shm_size_mb": -1}}})
+	res.mustNotSucceed(t, "a negative shm_size_mb")
+}

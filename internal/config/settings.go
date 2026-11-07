@@ -546,6 +546,10 @@ var registry = buildRegistry([]Setting{
 	// environment without anything restarting.
 	// ---------------------------------------------------------------------
 	{
+		Key: "runners.shm_size_mb", Label: "Shared memory size", Env: "ZOOMIES_SHM_SIZE_MB", Kind: KindInt, Scope: ScopeInstance, Live: true,
+		Summary: "The size of /dev/shm in every runner container, in MB, unless a pool overrides it. Default 2048. Docker's own is 64 MB, where Chromium cannot keep its shared memory and can capture an empty screenshot. It is a tmpfs: only what a job writes is used, and that counts against the runner's memory limit. 0 leaves Docker's 64 MB.",
+	},
+	{
 		Key: "runners.docker_wait", Label: "Docker daemon wait", Env: "ZOOMIES_DOCKER_WAIT", Kind: KindDuration, Scope: ScopeInstance, Live: true,
 		Floor:   time.Second,
 		Summary: "How long DinD provisioning waits for a healthy daemon, and a Docker runner waits before registering. Default 3m. Whole seconds, up to an hour; 0 leaves the runner image's own default. A pool's env can set ZOOMIES_DOCKER_WAIT to override it for that pool.",

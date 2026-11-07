@@ -887,6 +887,59 @@ test('an in-page link lands once, so moving away at once stays moved', async ({ 
   }
 });
 
+// On a busy machine hashchange and the next frame can come well after the
+// browser has focused the row it scrolled to. A landing left to either of them
+// then arrived after the person had moved on and took focus back (CI, 7 Nov:
+// the row was focused by the browser and only marked as landed 40 ms later,
+// after the test had blurred it). Here both are held back 150 ms, and a link
+// to a check must still have landed, and finished, when the click returns.
+test('a link to a check lands in the click, so a slow machine cannot land it late', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const add = window.addEventListener.bind(window);
+    window.addEventListener = ((
+      type: string,
+      fn: EventListenerOrEventListenerObject,
+      opts?: unknown,
+    ) => {
+      if (type !== 'hashchange') return add(type, fn, opts as AddEventListenerOptions);
+      const call = (e: Event) =>
+        setTimeout(() => (typeof fn === 'function' ? fn(e) : fn.handleEvent(e)), 150);
+      return add(type, call, opts as AddEventListenerOptions);
+    }) as typeof window.addEventListener;
+    const raf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = (fn: FrameRequestCallback) =>
+      window.setTimeout(() => raf(fn), 150) as unknown as number;
+  });
+  const name = `health-late-${Date.now() % 1e6}`;
+  const credentials = await enrol(page, name);
+  const disk = check('disk.space', 'Work directory free space', 'safe', 'error', {
+    current: '3% free (11G)',
+  });
+  const watches = check('inotify.watches', 'File watches', 'safe', 'warn', { current: '8192' });
+  try {
+    await heartbeat(page, credentials, [watches, disk]);
+    await page.goto(`/hosts/${credentials.host_id}#disk.space`, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('.health-content tr[id="disk.space"]')).toBeFocused();
+    await page.locator('.health-content').getByRole('link', { name: 'File watches' }).click();
+    const watchesRow = page.locator('.health-content tr[id="inotify.watches"]');
+    await expect(watchesRow).toBeFocused();
+    // Not waited for: landed by the time the click returns, or not at all.
+    expect(await watchesRow.getAttribute('data-landed')).toBe('');
+    await page.evaluate(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+      window.scrollTo(0, 0);
+    });
+    await page.waitForTimeout(600);
+    expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('TR');
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    expect(new URL(page.url()).hash).toBe('#inotify.watches');
+  } finally {
+    await page.request.delete(`/api/v1/hosts/${credentials.host_id}?force=true`);
+  }
+});
+
 // A link that names a check is only useful if it lands on that check and a
 // keyboard user comes with it: focus left on the heading, or on <body>, makes
 // the click a scroll position and nothing more.

@@ -325,6 +325,21 @@
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   });
+  // A link to a check on this page lands in the click itself. Left to the
+  // browser, the landing waited for hashchange or a frame, both later than the
+  // browser's own focus on the (focusable) row: on a busy machine the person
+  // could have moved on in between, and the late landing took focus and the
+  // scroll back to the row. A modified click is left to the browser.
+  function followCheck(e: MouseEvent, checkId: string): void {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)
+      return;
+    e.preventDefault();
+    const hash = `#${checkId}`;
+    if (location.hash !== hash) history.pushState(history.state, '', hash);
+    landedFor = `${untrack(() => router.navigation)}:${location.hash}`;
+    landing += 1; // nothing scheduled earlier lands after this
+    land();
+  }
 
   // Accepting and revoking change what the controller counts and nothing on the
   // host. Not optimistic: the answer is the host, and every surface repaints
@@ -691,7 +706,7 @@
             {@const badge = statusBadge(check)}
             <li>
               <Badge label={badge.label} tone={badge.tone} />
-              <a href="#{check.id}">{check.title}</a>
+              <a href="#{check.id}" onclick={(e) => followCheck(e, check.id)}>{check.title}</a>
               <span class="now"
                 >now <code>{niceValue(check.current) || NO_VALUE}</code>, recommended
                 <code>{niceValue(check.recommended) || NO_VALUE}</code></span
@@ -1248,8 +1263,9 @@
   tr[id] {
     scroll-margin-top: calc(var(--z-topbar-height) + var(--z-space-4));
   }
-  /* data-landed is set from script, so the compiler cannot see it. */
-  tr:target,
+  /* data-landed is set from script, so the compiler cannot see it. It is the
+     only mark: a link to a check lands in its click through pushState, which
+     leaves :target on the row the page was opened at. */
   tr:global([data-landed]) {
     background: var(--z-accent-subtle);
   }

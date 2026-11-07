@@ -154,6 +154,29 @@ test('an agent that never answers is reported as not answering once the page has
   });
 });
 
+// One press is one toast, however the failure is told. Here the page's own
+// clock gives up first, and the agent's refusal then arrives as the
+// controller's failure: the same ask, reported a second way. Each way used to
+// be a toast of its own, which is what put two identical toasts on CI.
+test('a press that fails two ways is still one toast', async ({ page }) => {
+  await page.clock.install();
+  await withAgent(page, 'chk-twice-told', async (agent, name) => {
+    agent.setAnswer(() => ({ kind: 'failure', error: 'the disk check hung' }));
+    const release = agent.hold();
+    await goto(page, `/hosts/${agent.id}`, name);
+    await page.getByRole('button', BUTTON).click();
+    await expect(note(page)).toHaveText(`Asked ${name} to check itself…`);
+    await page.clock.fastForward(88_000);
+    const toast = page
+      .locator('.toast[data-tone="error"]')
+      .filter({ hasText: `Check now failed on ${name}` });
+    await expect(toast).toHaveCount(1);
+    release();
+    await expect(note(page)).toHaveText(`${name} could not run its checks: the disk check hung`);
+    await expect(toast).toHaveCount(1);
+  });
+});
+
 // The cooldown is the controller's, and the page does not spend a request to
 // learn it. The button stays enabled so focus is not thrown away.
 test('a second press inside the cooldown asks nothing and says how long to wait', async ({

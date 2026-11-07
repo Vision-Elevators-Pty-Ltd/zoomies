@@ -853,6 +853,40 @@ test('a macOS host and a container are told their report is read-only, not to tu
   }
 });
 
+// An in-page link is one landing. It fires popstate, which the router counts
+// as a navigation and the page schedules a landing for a frame later, and then
+// hashchange, which lands at once; the late one used to land again after the
+// person had moved on, and took focus and the scroll back to the row. A client
+// fast enough to move away inside that frame is what a fast CI machine is.
+test('an in-page link lands once, so moving away at once stays moved', async ({ page }) => {
+  const name = `health-once-${Date.now() % 1e6}`;
+  const credentials = await enrol(page, name);
+  const disk = check('disk.space', 'Work directory free space', 'safe', 'error', {
+    current: '3% free (11G)',
+  });
+  const watches = check('inotify.watches', 'File watches', 'safe', 'warn', { current: '8192' });
+  try {
+    await heartbeat(page, credentials, [watches, disk]);
+    await page.goto(`/hosts/${credentials.host_id}#disk.space`, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('.health-content tr[id="disk.space"]')).toBeFocused();
+    // The click and the move away in one task, then two frames for anything late.
+    await page.evaluate(() => {
+      const link = [...document.querySelectorAll<HTMLAnchorElement>('.health-content a')].find(
+        (a) => a.textContent?.includes('File watches'),
+      );
+      link?.click();
+      setTimeout(() => (document.activeElement as HTMLElement | null)?.blur(), 0);
+    });
+    await page.evaluate(
+      () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+    );
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('TR');
+  } finally {
+    await page.request.delete(`/api/v1/hosts/${credentials.host_id}?force=true`);
+  }
+});
+
 // A link that names a check is only useful if it lands on that check and a
 // keyboard user comes with it: focus left on the heading, or on <body>, makes
 // the click a scroll position and nothing more.

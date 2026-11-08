@@ -1186,7 +1186,7 @@ func (b *DockerBackend) MemoryUsage(ctx context.Context, container string) (Memo
 		}
 		return MemoryReading{}, fmt.Errorf("backend: reading the memory of container %s: %w", shortID(container), err)
 	}
-	return MemoryReading{UsageBytes: s.MemoryBytes, LimitBytes: s.MemoryLimit, SampledAt: time.Now()}, nil
+	return MemoryReading{UsageBytes: s.MemoryBytes, LimitBytes: s.MemoryLimit, WorkingSetBytes: s.WorkingSetBytes, SampledAt: time.Now()}, nil
 }
 
 // RaiseMemory raises a live container's memory limit, and the swap it may use
@@ -1909,6 +1909,7 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		r := <-runner
 		if r.err == nil {
 			r.stats.Scratch, r.stats.ScratchUnmeasured = collectScratch(measured)
+			r.stats.Containers = []string{string(h)}
 		}
 		return r.stats, r.err
 	}
@@ -1917,6 +1918,7 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		r := <-runner
 		if r.err == nil {
 			r.stats.Scratch, r.stats.ScratchUnmeasured = collectScratch(measured)
+			r.stats.Containers = []string{string(h)}
 		}
 		return r.stats, r.err
 	}
@@ -1929,6 +1931,7 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 	type half struct {
 		stats  Stats
 		labels map[string]string
+		id     string
 	}
 	var halves []half
 	for _, sidecar := range sidecars {
@@ -1945,7 +1948,7 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		if err != nil {
 			return Stats{}, err
 		}
-		halves = append(halves, half{Stats(sampled), sidecar.Labels})
+		halves = append(halves, half{Stats(sampled), sidecar.Labels, sidecar.ID})
 	}
 	r := <-runner
 	if r.err != nil {
@@ -1953,6 +1956,7 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 	}
 	out := r.stats
 	out.Scratch, out.ScratchUnmeasured = collectScratch(measured)
+	out.Containers = []string{string(h)}
 	busiest := halfPercent(out.CPUPercent, insp.Config.Labels)
 	runnerHalf := halfUse(out, insp.Config.Labels)
 	var daemonHalf *HalfUse
@@ -1961,6 +1965,7 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		use := halfUse(h.stats, h.labels)
 		daemonHalf = &use
 		out = addStats(out, h.stats)
+		out.Containers = append(out.Containers, h.id)
 	}
 	out.BusiestHalfPercent = busiest
 	if daemonHalf != nil {
@@ -1979,7 +1984,7 @@ func halfUse(s Stats, labels map[string]string) HalfUse {
 	if limit == 0 {
 		limit = s.MemoryLimit
 	}
-	return HalfUse{CPUs: s.CPUPercent / 100, CPULimit: res.CPUs, MemoryBytes: s.MemoryBytes, MemoryLimit: limit}
+	return HalfUse{CPUs: s.CPUPercent / 100, CPULimit: res.CPUs, MemoryBytes: s.MemoryBytes, MemoryLimit: limit, WorkingSetBytes: s.WorkingSetBytes}
 }
 
 // halfPercent is a container's CPU use as a share of the quota it was created
@@ -1996,6 +2001,13 @@ func addStats(a, b Stats) Stats {
 	a.CPUPercent += b.CPUPercent
 	a.MemoryBytes += b.MemoryBytes
 	a.MemoryLimit += b.MemoryLimit
+	// A pair's working set is known only if both halves' are: one half's
+	// alone would read as the whole runner using less than it does.
+	if a.WorkingSetBytes > 0 && b.WorkingSetBytes > 0 {
+		a.WorkingSetBytes += b.WorkingSetBytes
+	} else {
+		a.WorkingSetBytes = 0
+	}
 	if a.SampledAt == nil || b.SampledAt != nil && b.SampledAt.After(*a.SampledAt) {
 		a.SampledAt = b.SampledAt
 	}

@@ -112,3 +112,44 @@ func TestAJobKilledForMemoryIsRecordedExplainedAndReported(t *testing.T) {
 		t.Error("no jobs.oom_killed problem was raised")
 	}
 }
+
+// A report's working set is recorded on the job beside its usage peak: the
+// most of the sample's own and the peak the agent's faster samples saw, and a
+// later, smaller report lowers nothing. An agent that sends neither records
+// nothing, which the history reads as "measured the old way".
+func TestAReportsWorkingSetPeakIsRecordedOnTheRunningJob(t *testing.T) {
+	h := newHarness(t)
+	_, pool, host := h.fleet()
+	r := h.seedRunner(t, pool, host, store.RunnerBusy)
+	started := h.c.Now().Add(-time.Hour)
+	if _, err := h.st.UpsertJob(h.ctx, &store.Job{
+		GitHubJobID: 4343, Repo: "eyupio/zoomies", Workflow: "CI", JobName: "build",
+		Labels: pool.Labels, State: store.JobInProgress, PoolID: pool.ID, Matched: true,
+		RunnerID: r.ID, RunnerName: r.Name, QueuedAt: started, StartedAt: &started, HostID: host.ID,
+	}); err != nil {
+		t.Fatalf("UpsertJob: %v", err)
+	}
+	at := h.c.Now()
+	for _, s := range []backend.Stats{
+		{SampledAt: &at, CPUPercent: 100, MemoryBytes: 9000 << 20, WorkingSetBytes: 5000 << 20, WorkingSetPeakBytes: 6500 << 20},
+		{SampledAt: &at, CPUPercent: 100, MemoryBytes: 3000 << 20, WorkingSetBytes: 2000 << 20},
+		{SampledAt: &at, CPUPercent: 100, MemoryBytes: 1000 << 20},
+	} {
+		if err := h.c.ReportRunners(h.ctx, host.ID, []agent.RunnerReport{{RunnerID: r.ID, Stats: s}}); err != nil {
+			t.Fatalf("ReportRunners: %v", err)
+		}
+	}
+	done := h.c.Now()
+	if _, err := h.st.UpsertJob(h.ctx, &store.Job{GitHubJobID: 4343, State: store.JobCompleted, Conclusion: "success",
+		Repo: "eyupio/zoomies", StartedAt: &started, CompletedAt: &done}); err != nil {
+		t.Fatalf("completing the job: %v", err)
+	}
+	key := store.JobUsageKey{Repo: "eyupio/zoomies", Workflow: "CI", JobName: "build", PoolID: pool.ID}
+	got, err := h.st.JobUsageHistory(h.ctx, []store.JobUsageKey{key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runs := got[key]; len(runs) != 1 || runs[0].MemoryMB != 9000 || runs[0].WorkingSetMB != 6500 {
+		t.Fatalf("history = %+v, want one run at 9000 MB with a 6500 MB working set", runs)
+	}
+}

@@ -1686,6 +1686,14 @@ func (c *Controller) applyReports(ctx context.Context, hostID string, reports []
 				if err := c.st.RecordJobUsage(ctx, r.ID, rep.Stats.CPUPercent/100, rep.Stats.MemoryBytes/(1<<20)); err != nil {
 					c.log.Debug("could not record a job's usage", "runner", r.ID, "error", err)
 				}
+				// Its working set beside it, the most the agent's faster
+				// samples saw since the last report: what the job history
+				// reads once a job has enough runs measured this way.
+				if ws := max(rep.Stats.WorkingSetPeakBytes, rep.Stats.WorkingSetBytes) >> 20; ws > 0 {
+					if err := c.st.RecordJobWorkingSet(ctx, r.ID, ws); err != nil {
+						c.log.Debug("could not record a job's working set", "runner", r.ID, "error", err)
+					}
+				}
 				// What each container of a pair used, which is what a pool's smallest
 				// runner is sized to hold: the window in memory is the last few hours,
 				// and this is every job of the week.

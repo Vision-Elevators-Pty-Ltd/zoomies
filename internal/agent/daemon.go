@@ -411,12 +411,15 @@ type tracked struct {
 	// stale is said so once and not at every failure.
 	statsMisses int
 
-	state      store.RunnerState
-	phase      backend.Phase
-	stats      backend.Stats
-	exitCode   int
-	message    string
-	observedAt time.Time
+	state store.RunnerState
+	phase backend.Phase
+	stats backend.Stats
+	// workingSets is the fast working-set readings of the last
+	// workingSetWindow (workingset.go), folded into the next stats sample.
+	workingSets []workingSetSample
+	exitCode    int
+	message     string
+	observedAt  time.Time
 
 	// fault is the classification of a failed end of life. It is kept beside
 	// the message because the heartbeat's copy of this runner is the retry when
@@ -961,6 +964,7 @@ func (a *Agent) run(ctx context.Context) error {
 	run("tasks", a.taskLoop)
 	run("reconcile", a.reconcileLoop)
 	run("stats", a.statsLoop)
+	run("working-set", a.workingSetLoop)
 	run("watchdog", a.watchdogLoop)
 	run("native-logs", a.nativeLogLoop)
 	run("boost-expiry", a.boostExpiryLoop)

@@ -68,6 +68,8 @@ func (a *Agent) sampleStats(ctx context.Context) {
 				a.mu.Lock()
 				if current := a.runners[r.runnerID]; current != nil &&
 					current.handle == r.handle && !current.terminal && !current.hostRemoved {
+					current.workingSets = pruneWorkingSets(current.workingSets, sampledAt)
+					stats.WorkingSetPeakBytes = workingSetPeak(stats, current.workingSets, sampledAt)
 					current.stats = stats
 					current.statsMisses = 0
 				}

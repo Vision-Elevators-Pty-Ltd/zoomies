@@ -313,3 +313,11 @@ func TestTheReasonSaysHowTheRunnerWasBooked(t *testing.T) {
 		t.Fatalf("the plan's booking for the agent is %+v", hb)
 	}
 }
+
+// A history the store switches to working-set peaks has enough runs for a
+// booking to be taken from.
+func TestTheStoreSwitchesHistoryAtTheBookingsMinimum(t *testing.T) {
+	if store.WorkingSetMinRuns != BookingMinSamples {
+		t.Fatalf("store.WorkingSetMinRuns = %d, BookingMinSamples = %d; they must agree", store.WorkingSetMinRuns, BookingMinSamples)
+	}
+}

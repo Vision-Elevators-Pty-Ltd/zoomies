@@ -29,6 +29,54 @@ type JobPeak struct {
 	// spike between two samples can read well under the limit it hit, and the
 	// limit is the one figure that is known to have been too little.
 	GrantedMemoryMB int64 `json:"granted_memory_mb,omitempty"`
+	// WorkingSetMB is the run's working-set peak (peak_working_set_mb): its
+	// usage less all reclaimable page cache. Zero for a run measured only the
+	// old way. PreferWorkingSet decides which figure MemoryMB carries.
+	WorkingSetMB int64 `json:"working_set_mb,omitempty"`
+}
+
+// WorkingSetMinRuns is how many runs of a job, or of a pool, must have a
+// working-set peak before its history is read from those runs alone. It is
+// scheduler.BookingMinSamples, the fewest runs a booking is taken from, held
+// equal by a test: a history that switches must still be one a booking can be
+// taken from.
+const WorkingSetMinRuns = 5
+
+// PreferWorkingSet is one job's (or one pool's) runs as the history should
+// read them, newest first as given.
+//
+// Once at least WorkingSetMinRuns of them carry a working-set peak, the runs
+// that do are kept with MemoryMB set to it, and the runs measured only the old
+// way are dropped: Docker's figure counts the file cache a build re-reads, and
+// a history that kept mixing the two would keep booking and raising by the
+// inflated runs for as long as they were among the newest twenty. Until then
+// every run keeps the old figure, which is never smaller, so a job with too few
+// new runs is read exactly as before.
+//
+// A run the kernel killed for memory is always kept as it was: the limit it
+// hit is the one figure known to have been too little, however the run was
+// sampled.
+func PreferWorkingSet(peaks []JobPeak) []JobPeak {
+	n := 0
+	for _, p := range peaks {
+		if p.WorkingSetMB > 0 && !p.OOMKilled {
+			n++
+		}
+	}
+	if n < WorkingSetMinRuns {
+		return peaks
+	}
+	out := make([]JobPeak, 0, len(peaks))
+	for _, p := range peaks {
+		switch {
+		case p.OOMKilled:
+			out = append(out, p)
+		case p.WorkingSetMB > 0:
+			p.MemoryMB = p.WorkingSetMB
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // JobUsageHistoryLimit is how many recent runs of one job a profile is taken
@@ -51,6 +99,18 @@ func (s *Store) RecordJobUsage(ctx context.Context, runnerID string, cpus float6
 	}
 	_, err := s.exec(ctx, `UPDATE jobs SET peak_cpus = MAX(peak_cpus, ?), peak_memory_mb = MAX(peak_memory_mb, ?)
 		WHERE state = 'in_progress' AND runner_id = ?`, max(cpus, 0), max(memoryMB, 0), runnerID)
+	return err
+}
+
+// RecordJobWorkingSet raises the working-set peak of the job in progress on a
+// runner to one sample of it, in MB, the way RecordJobUsage raises its usage
+// peak: only a job GitHub says is in progress, and never lowered.
+func (s *Store) RecordJobWorkingSet(ctx context.Context, runnerID string, memoryMB int64) error {
+	if runnerID == "" || memoryMB <= 0 {
+		return nil
+	}
+	_, err := s.exec(ctx, `UPDATE jobs SET peak_working_set_mb = MAX(peak_working_set_mb, ?)
+		WHERE state = 'in_progress' AND runner_id = ?`, memoryMB, runnerID)
 	return err
 }
 
@@ -135,7 +195,7 @@ func (s *Store) JobUsageHistory(ctx context.Context, keys []JobUsageKey) (map[Jo
 // jobUsageHistorySQL is a const so a query-plan test can pin the statement
 // that ships: it must seek idx_jobs_usage_profile, not scan the table, because
 // it runs for every distinct queued job on every scheduling pass.
-const jobUsageHistorySQL = `SELECT pool_id, peak_cpus, peak_memory_mb, oom_killed, granted_memory_mb FROM jobs
+const jobUsageHistorySQL = `SELECT pool_id, peak_cpus, peak_memory_mb, oom_killed, granted_memory_mb, peak_working_set_mb FROM jobs
 	WHERE repo = ? AND workflow = ? AND job_name = ? AND state = 'completed'
 	AND (peak_memory_mb > 0 OR peak_cpus > 0 OR oom_killed = 1)
 	ORDER BY completed_at DESC LIMIT ?`
@@ -152,7 +212,7 @@ func (s *Store) jobUsageHistory(ctx context.Context, repo, workflow, job string,
 		var p JobPeak
 		var pool string
 		var oom int
-		if err := rows.Scan(&pool, &p.CPUs, &p.MemoryMB, &oom, &p.GrantedMemoryMB); err != nil {
+		if err := rows.Scan(&pool, &p.CPUs, &p.MemoryMB, &oom, &p.GrantedMemoryMB, &p.WorkingSetMB); err != nil {
 			return err
 		}
 		p.OOMKilled = oom == 1
@@ -161,14 +221,22 @@ func (s *Store) jobUsageHistory(ctx context.Context, repo, workflow, job string,
 			out[k] = append(out[k], p)
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for k, peaks := range out {
+		if k.Repo == repo && k.Workflow == workflow && k.JobName == job {
+			out[k] = PreferWorkingSet(peaks)
+		}
+	}
+	return nil
 }
 
 // poolUsageHistorySQL is a const so a query-plan test can pin the statement
 // that ships: it runs for every pool on every scheduling pass under
 // scheduler.memory_booking=history, so it walks the pool's index newest first
 // and stops at the limit rather than sorting the pool's whole history.
-const poolUsageHistorySQL = `SELECT peak_cpus, peak_memory_mb, oom_killed, granted_memory_mb FROM jobs
+const poolUsageHistorySQL = `SELECT peak_cpus, peak_memory_mb, oom_killed, granted_memory_mb, peak_working_set_mb FROM jobs
 	WHERE pool_id = ? AND state = 'completed' AND (peak_memory_mb > 0 OR oom_killed = 1)
 	ORDER BY queued_at DESC LIMIT ?`
 
@@ -193,7 +261,7 @@ func (s *Store) PoolUsageHistory(ctx context.Context, poolIDs []string, limit in
 		for rows.Next() {
 			var p JobPeak
 			var oom int
-			if err := rows.Scan(&p.CPUs, &p.MemoryMB, &oom, &p.GrantedMemoryMB); err != nil {
+			if err := rows.Scan(&p.CPUs, &p.MemoryMB, &oom, &p.GrantedMemoryMB, &p.WorkingSetMB); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -204,6 +272,9 @@ func (s *Store) PoolUsageHistory(ctx context.Context, poolIDs []string, limit in
 		rows.Close()
 		if err != nil {
 			return nil, err
+		}
+		if peaks, ok := out[id]; ok {
+			out[id] = PreferWorkingSet(peaks)
 		}
 	}
 	return out, nil

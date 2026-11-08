@@ -1910,6 +1910,11 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		if r.err == nil {
 			r.stats.Scratch, r.stats.ScratchUnmeasured = collectScratch(measured)
 			r.stats.Containers = []string{string(h)}
+			if err != nil || insp.Config == nil {
+				// Whether this runner is half of a pair is not known, so
+				// neither is its working set: the sidecar may hold most of it.
+				r.stats.WorkingSetBytes = 0
+			}
 		}
 		return r.stats, r.err
 	}
@@ -1919,6 +1924,7 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		if r.err == nil {
 			r.stats.Scratch, r.stats.ScratchUnmeasured = collectScratch(measured)
 			r.stats.Containers = []string{string(h)}
+			r.stats.WorkingSetBytes = 0 // a pair whose sidecar cannot be found
 		}
 		return r.stats, r.err
 	}
@@ -1934,6 +1940,10 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		id     string
 	}
 	var halves []half
+	// A pair's working set is the runner's and its sidecar's together, so
+	// it is known only when the sidecar was found and read. Everything else
+	// in the sample is what it always was.
+	sidecarMissing := len(sidecars) == 0
 	for _, sidecar := range sidecars {
 		// The image store is the sidecar's folder, measured in the sidecar. One
 		// inspect per sample, for a pair only, and it is asked before the stats
@@ -1943,6 +1953,7 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		}
 		sampled, err := b.api.ContainerStats(ctx, sidecar.ID)
 		if errors.Is(err, ErrNotFound) {
+			sidecarMissing = true
 			continue
 		}
 		if err != nil {
@@ -1968,6 +1979,9 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		out.Containers = append(out.Containers, h.id)
 	}
 	out.BusiestHalfPercent = busiest
+	if sidecarMissing {
+		out.WorkingSetBytes = 0
+	}
 	if daemonHalf != nil {
 		out.Halves = &PairHalves{Runner: runnerHalf, Daemon: *daemonHalf}
 	}

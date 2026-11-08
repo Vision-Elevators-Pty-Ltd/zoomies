@@ -349,6 +349,10 @@ type HeartbeatResponse struct {
 	// controller sends nothing here, and an agent that receives nothing simply
 	// keeps what it adopted, which is the safe direction.
 	UnknownRunners []string `json:"unknown_runners,omitempty"`
+	// WorkingSetSamplingOff stops the agent's 10-second working-set readings
+	// (scheduler.working_set_sampling = off). A controller older than the
+	// field never sends it, and the readings run.
+	WorkingSetSamplingOff bool `json:"working_set_sampling_off,omitempty"`
 }
 
 // ElasticCPUDirective lends otherwise idle CPU to one runner. The factor is
@@ -425,6 +429,12 @@ type RunnerReport struct {
 	// and exactly what it knew before.
 	Fault store.FaultKind `json:"fault,omitempty"`
 	Stats backend.Stats   `json:"stats,omitempty"`
+	// WorkingSet is the runner's kept working-set peak and whether its
+	// readings covered its life (workingset.go), on every report of a runner
+	// the agent tracks. It is apart from Stats so that nothing that reads a
+	// runner's sample sees anything new. Nil before the first reading, and
+	// from an agent older than the field.
+	WorkingSet *WorkingSetReport `json:"working_set,omitempty"`
 	// OutputTail is the runner's last lines when it ended in a fault or with
 	// a non-zero code, sent with that one report. The container is removed
 	// soon after, and these lines are the only evidence of what it said that
@@ -612,3 +622,17 @@ const DefaultStopTimeout = 5 * time.Minute
 // possibly a write behind the single writer, so an unbounded array is a way
 // for one host to hold the writer for every other host.
 const MaxRunnersPerReport = 1000
+
+// WorkingSetReport is a runner's working set as the agent kept it.
+type WorkingSetReport struct {
+	// PeakBytes is the most working set any reading of the runner saw, its
+	// 10-second ones and its full samples, over its whole life (an ephemeral
+	// runner's life is its job).
+	PeakBytes int64 `json:"peak_bytes"`
+	// Incomplete says the readings may have missed part of the runner's life:
+	// more than 45 seconds while it ran without a reading, a reading that
+	// failed or came back unknown, or a runner this agent adopted rather than
+	// watched from its start. The controller never counts such a run as
+	// measured the new way.
+	Incomplete bool `json:"incomplete,omitempty"`
+}

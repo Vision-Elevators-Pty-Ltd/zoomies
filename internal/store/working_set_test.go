@@ -144,9 +144,10 @@ func TestRecordJobWorkingSetFindsTheRunnersJobAndKeepsUntrustedForGood(t *testin
 	}
 }
 
-// Both histories read the working set, job by job, once enough trusted runs
-// have it.
-func TestTheHistoriesReadTheWorkingSetOnceEnoughRunsHaveIt(t *testing.T) {
+// The store's histories return every run at its usage peak, as before; the
+// switch (PreferWorkingSet), which the controller applies only under
+// scheduler.working_set_history = on, reads them job by job.
+func TestTheHistoriesKeepUsagePeaksAndTheSwitchReadsThemJobByJob(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	n := 0
@@ -171,42 +172,34 @@ func TestTheHistoriesReadTheWorkingSetOnceEnoughRunsHaveIt(t *testing.T) {
 	for i := range 10 {
 		record("heavy", 8192, 0, true, versionsEpoch.Add(time.Duration(i)*time.Minute))
 	}
-	for i := range 6 { // six partial measurements of the heavy job: never trusted
+	for i := range 6 {
 		record("heavy", 8192, 512, false, versionsEpoch.Add(30*time.Minute+time.Duration(i)*time.Minute))
 	}
 	for i := range 5 {
 		record("light", 1500, 1024, true, versionsEpoch.Add(time.Hour+time.Duration(i)*time.Minute))
 	}
-	heavy := JobUsageKey{Repo: "eyupio/zoomies", Workflow: "CI", JobName: "heavy", PoolID: "pool_a"}
-	light := JobUsageKey{Repo: "eyupio/zoomies", Workflow: "CI", JobName: "light", PoolID: "pool_a"}
-	jobs, err := s.JobUsageHistory(ctx, []JobUsageKey{heavy, light})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range jobs[heavy] {
-		if p.MemoryMB != 8192 {
-			t.Fatalf("the heavy job, never trusted, read %+v; want 8192 throughout", p)
-		}
-	}
-	if l := jobs[light]; len(l) != 5 || l[0].MemoryMB != 1024 {
-		t.Fatalf("the light job = %+v, want five runs at 1024", l)
-	}
 	pools, err := s.PoolUsageHistory(ctx, []string{"pool_a"}, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
+	raw := pools["pool_a"]
+	for _, p := range raw {
+		if p.MemoryMB != 8192 && p.MemoryMB != 1500 {
+			t.Fatalf("the store returned %+v; every run must be at its usage peak", p)
+		}
+	}
 	h, l := 0, 0
-	for _, p := range pools["pool_a"] {
+	for _, p := range PreferWorkingSet(raw) {
 		switch p.MemoryMB {
 		case 8192:
 			h++
 		case 1024:
 			l++
 		default:
-			t.Fatalf("pool run read %+v", p)
+			t.Fatalf("switched pool run read %+v", p)
 		}
 	}
 	if h != 16 || l != 5 {
-		t.Fatalf("pool history: %d heavy and %d light runs, want 16 and 5", h, l)
+		t.Fatalf("switched pool history: %d heavy and %d light runs, want 16 and 5", h, l)
 	}
 }

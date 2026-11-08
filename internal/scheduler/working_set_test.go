@@ -63,3 +63,65 @@ func TestPartialMeasurementsDoNotLowerAJobsRaise(t *testing.T) {
 		t.Fatalf("booking fell to %d MiB on partial measurements", b)
 	}
 }
+
+// With scheduler.working_set_history off the controller hands scheduling the
+// store's history untouched: vision.9's rows (store.TestTheHistoriesAreVision9s...)
+// plus the two fields the switch alone reads. Nothing here reads them: history
+// booking, the raise need, a profile, and a whole booker give the same answers
+// for a mixed history with them and without them.
+func TestTheWorkingSetFieldsMoveNoSchedulingFigure(t *testing.T) {
+	var with []store.JobPeak
+	for i := range 8 {
+		with = append(with, store.JobPeak{CPUs: 2, MemoryMB: int64(8000 + i), Job: "heavy"})
+	}
+	for i := range 6 {
+		with = append(with, store.JobPeak{CPUs: 1, MemoryMB: int64(1500 + i), WorkingSetMB: 512, Job: "light"})
+	}
+	for i := range 4 {
+		with = append(with, store.JobPeak{CPUs: 4, MemoryMB: int64(9000 + i), WorkingSetMB: -1, Job: "heavy"})
+	}
+	with = append(with, store.JobPeak{CPUs: 4, MemoryMB: 7000, OOMKilled: true, GrantedMemoryMB: 12288, WorkingSetMB: 6000, Job: "heavy"})
+	without := make([]store.JobPeak, len(with))
+	for i, p := range with {
+		p.WorkingSetMB, p.Job = 0, ""
+		without[i] = p
+	}
+	for _, headroom := range []int{0, 25} {
+		a, ka := historyBooking(with, headroom)
+		b, kb := historyBooking(without, headroom)
+		if a != b || ka != kb {
+			t.Fatalf("historyBooking(%d): %d/%v with the fields, %d/%v without", headroom, a, ka, b, kb)
+		}
+		a, ka = raiseNeedMB(with, headroom)
+		b, kb = raiseNeedMB(without, headroom)
+		if a != b || ka != kb {
+			t.Fatalf("raiseNeedMB(%d): %d/%v with the fields, %d/%v without", headroom, a, ka, b, kb)
+		}
+	}
+	for _, q := range []float64{0.5, 0.9} {
+		a, ka := expectedPeak(with, q)
+		b, kb := expectedPeak(without, q)
+		if a != b || ka != kb {
+			t.Fatalf("expectedPeak(%v): %d/%v with, %d/%v without", q, a, ka, b, kb)
+		}
+	}
+	if a, b := Profile(with), Profile(without); a != b {
+		t.Fatalf("Profile: %+v with the fields, %+v without", a, b)
+	}
+	pool := limited("zoomies-pr-browser", 8, 32*gb)
+	h := nlAgent("ci-nl-01-pr", "", 49*gb)
+	r := usingMB("run_a", pool, h, 3*gb)
+	key := store.JobUsageKey{Repo: "o/r", Workflow: "ci", JobName: "heavy", PoolID: pool.ID}
+	demand := map[string][]*store.Job{pool.ID: {{Repo: "o/r", Workflow: "ci", JobName: "heavy"}}}
+	book := func(peaks []store.JobPeak) (int64, int64, int64) {
+		in := &BookingInputs{PoolRuns: map[string][]store.JobPeak{pool.ID: peaks}, RunnerJobs: map[string]store.JobUsageKey{r.ID: key}}
+		b := newBooker(BookingHistory, 25, in, map[store.JobUsageKey][]store.JobPeak{key: peaks}, []*store.Pool{pool}, demand)
+		booked, _, _ := b.runner(pool, h, r)
+		return b.unknown[pool.ID], booked, b.typicalStart(pool, 32*gb, nil)
+	}
+	u1, r1, s1 := book(with)
+	u2, r2, s2 := book(without)
+	if u1 != u2 || r1 != r2 || s1 != s2 {
+		t.Fatalf("booker: %d/%d/%d with the fields, %d/%d/%d without", u1, r1, s1, u2, r2, s2)
+	}
+}

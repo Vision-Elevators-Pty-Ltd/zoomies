@@ -243,13 +243,17 @@ type Options struct {
 // Everything it does is outbound. Nothing dials an agent.
 type Agent struct {
 	mutationsPaused atomic.Bool
-	boostRenewedAt  time.Time
-	usageSampler    machine.UsageSampler
-	opts            Options
-	log             *slog.Logger
-	tr              Transport
-	clock           func() time.Time
-	heartbtI        time.Duration
+	// workingSetSamplingOff is the controller's word (scheduler.working_set_sampling
+	// = off) that the 10-second working-set readings stop; the full stats
+	// samples go on as before.
+	workingSetSamplingOff atomic.Bool
+	boostRenewedAt        time.Time
+	usageSampler          machine.UsageSampler
+	opts                  Options
+	log                   *slog.Logger
+	tr                    Transport
+	clock                 func() time.Time
+	heartbtI              time.Duration
 	// retention is Options.FinishedRetention: how long a finished runner's
 	// workload outlives its report before the reconciler deletes it.
 	retention time.Duration
@@ -473,13 +477,7 @@ type tracked struct {
 }
 
 func (t *tracked) report() RunnerReport {
-	return t.reportAt(time.Now())
-}
-
-// reportAt is report with the time a running runner's coverage is judged at.
-func (t *tracked) reportAt(now time.Time) RunnerReport {
 	stats := t.stats
-	t.foldWorkingSet(&stats, now)
 	factor := 1.0
 	if t.appliedCPUFactor != nil && *t.appliedCPUFactor > 0 {
 		factor = *t.appliedCPUFactor
@@ -652,7 +650,9 @@ func (a *Agent) Runners() []RunnerReport {
 	out := make([]RunnerReport, 0, len(a.runners))
 	now := a.now()
 	for _, r := range a.runners {
-		out = append(out, r.reportAt(now))
+		rep := r.report()
+		rep.WorkingSet = r.workingSetReport(now)
+		out = append(out, rep)
 	}
 	slices.SortFunc(out, func(x, y RunnerReport) int { return strings.Compare(x.RunnerID, y.RunnerID) })
 	return out
@@ -1120,6 +1120,7 @@ func (a *Agent) heartbeat(ctx context.Context) error {
 	// The beat carried every runner the agent tracks, so the controller now
 	// knows how each finished one ended, and its workload may go.
 	a.mutationsPaused.Store(resp.MutationsPaused)
+	a.workingSetSamplingOff.Store(resp.WorkingSetSamplingOff)
 	a.markReported(runners)
 
 	if !a.ready.Swap(true) {
@@ -2456,6 +2457,9 @@ func (a *Agent) adopt(runnerID string, kind store.BackendKind, w backend.Workloa
 		phase:      w.Status.Phase,
 		observedAt: now,
 		resources:  w.Resources,
+		// Whatever an earlier agent read of it went with that agent, so its
+		// working set can never be a measurement of its whole job.
+		workingSetIncomplete: true,
 	}
 	if a.runners[runnerID].createdAt.IsZero() {
 		a.runners[runnerID].createdAt = now

@@ -1,6 +1,12 @@
 package backend
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"testing"
+
+	"github.com/eyupio/zoomies/internal/store"
+)
 
 const wsMiB = 1 << 20
 
@@ -114,5 +120,71 @@ func TestASampleAndAPairCarryTheWorkingSet(t *testing.T) {
 	}
 	if half := addStats(Stats{WorkingSetBytes: 600 * wsMiB}, Stats{}); half.WorkingSetBytes != 0 {
 		t.Fatalf("a pair with one half unknown has working set %d, want 0 (unknown)", half.WorkingSetBytes)
+	}
+}
+
+// Re-review of #20, blocker 5: a docker-in-docker sample is a known working set
+// only when the runner's pair membership is known and its sidecar was found and
+// read. A failed inspect, an empty sidecar list or a sidecar whose stats are
+// gone each leave the working set unknown, and nothing else in the sample
+// changes. A whole pair is the sum of both.
+func TestADinDSampleWithoutItsSidecarHasNoWorkingSet(t *testing.T) {
+	stats := func(mb uint64) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			var raw statsJSON
+			raw.MemoryStats.Usage = mb * wsMiB
+			raw.MemoryStats.Stats = v2Stats(nil)
+			writeJSON(w, http.StatusOK, raw)
+		}
+	}
+	for _, mode := range []string{"empty-list", "sidecar-404", "inspect-failed", "whole-pair"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFakeEngine(t, map[string]http.HandlerFunc{
+				"GET " + v + "/containers/c1/stats": stats(512),
+				"GET " + v + "/containers/c1/json": func(w http.ResponseWriter, _ *http.Request) {
+					if mode == "inspect-failed" {
+						writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "inspect failed"})
+						return
+					}
+					writeJSON(w, http.StatusOK, ContainerInspect{ID: "c1", Config: &ContainerConfig{Labels: map[string]string{
+						LabelName: "runner-1", LabelDockerMode: string(store.DockerDinD)}}})
+				},
+				"GET " + v + "/containers/json": func(w http.ResponseWriter, _ *http.Request) {
+					if mode == "empty-list" {
+						writeJSON(w, http.StatusOK, []ContainerSummary{})
+						return
+					}
+					writeJSON(w, http.StatusOK, []ContainerSummary{{ID: "d1"}})
+				},
+				"GET " + v + "/containers/d1/json": func(w http.ResponseWriter, _ *http.Request) {
+					writeJSON(w, http.StatusOK, ContainerInspect{ID: "d1", Config: &ContainerConfig{}})
+				},
+				"GET " + v + "/containers/d1/stats": func(w http.ResponseWriter, r *http.Request) {
+					if mode == "sidecar-404" {
+						writeJSON(w, http.StatusNotFound, map[string]string{"message": "gone"})
+						return
+					}
+					stats(1536)(w, r)
+				},
+			})
+			b := dockerBackendFor(t, f, DockerOptions{})
+			s, err := b.Stats(context.Background(), "c1")
+			if err != nil {
+				t.Fatalf("Stats: %v", err)
+			}
+			switch mode {
+			case "whole-pair":
+				if s.WorkingSetBytes != 2048*wsMiB || s.MemoryBytes != 2048*wsMiB {
+					t.Fatalf("a whole pair: working set %d MiB, usage %d MiB; want 2048 and 2048", s.WorkingSetBytes/wsMiB, s.MemoryBytes/wsMiB)
+				}
+			default:
+				if s.WorkingSetBytes != 0 {
+					t.Fatalf("%s: working set %d MiB, want unknown", mode, s.WorkingSetBytes/wsMiB)
+				}
+				if s.MemoryBytes != 512*wsMiB {
+					t.Fatalf("%s: usage %d MiB, want the runner's 512 as before", mode, s.MemoryBytes/wsMiB)
+				}
+			}
+		})
 	}
 }

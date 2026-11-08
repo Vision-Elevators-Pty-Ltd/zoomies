@@ -189,6 +189,8 @@ than about what any one setting says.
 | `scheduler.memory_overcommit_percent` | error | `scheduler.memory_overcommit_percent` | The memory overcommit is outside 100–300. Below 100 books less than the machine, which the host reserve already does by name; past 300 the booking says nothing about the machine. |
 | `scheduler.memory_overcommit_on` | warning | `scheduler.memory_overcommit_percent` | Each host's memory is booked more than once. A runner still starts only where its size and the reserve are measured free, but runners already placed can grow into each other, and if enough reach their limits at once the kernel kills one. Set it back to 100 to book each host once. |
 | `scheduler.memory_booking` | error | `scheduler.memory_booking` | Use `history` or `typed`. |
+| `scheduler.working_set_history` | error | `scheduler.working_set_history` | Use `off` or `on`. |
+| `scheduler.working_set_sampling` | error | `scheduler.working_set_sampling` | Use `on` or `off`. |
 | `scheduler.memory_admission` | error | `scheduler.memory_admission` | Use `measured` or `booked`. |
 | `scheduler.memory_booking_headroom_percent` | error | `scheduler.memory_booking_headroom_percent` | The headroom history booking adds to a job's ninetieth-percentile peak is outside 0–100. Past 100 books a runner for more than twice what its job has used, which typed booking does more plainly. |
 | `scheduler.host_throttling_off` | warning | `scheduler.host_throttling` | An overwhelmed host is never stepped down: the pressure holds still refuse new starts while CPU or memory is acutely short, but nothing outlasts a sample, and the runners already on the host are never slowed. Leave it on unless something outside Zoomies manages the hosts' load. |

@@ -739,6 +739,16 @@ var registry = buildRegistry([]Setting{
 		Summary: "What decides whether a host has memory for one more runner where memory is overcommitted. Booked starts one where the booking ceiling has room for it and its start charge is measured free. Measured starts it there too, and also where the booking is full but the measured free memory covers its start charge and the growth guard: what every runner on the machine may still grow by to what its job typically peaks at, plus the most one of them may grow past that to its limit. It never starts fewer runners than booked. A runner's limit, the reserve, the pressure holds and the CPU holds are the same either way.",
 	},
 	{
+		Key: "scheduler.working_set_history", Label: "Job history from working set", Env: "ZOOMIES_WORKING_SET_HISTORY", Kind: KindEnum, Scope: ScopeInstance, Live: true,
+		Choices: []string{"off", "on"},
+		Summary: "Whether booking, history raise and profiles read a job's working-set peaks (its memory less reclaimable page cache) once five of its runs have a trusted one. Off, the default, reads the usage peaks exactly as before; the working set is still recorded. Do not turn it on yet: three findings about switching a job's history (untrusted heavy runs dropped after a switch, distrust arriving after the 15-minute window, and jobs identified by display name) are open.",
+	},
+	{
+		Key: "scheduler.working_set_sampling", Label: "Working-set sampling", Env: "ZOOMIES_WORKING_SET_SAMPLING", Kind: KindEnum, Scope: ScopeInstance, Live: true,
+		Choices: []string{"on", "off"},
+		Summary: "Whether agents read each running runner's working set every 10 seconds between their 30-second stats samples, so a short memory spike reaches the job's recorded working-set peak. Off stops the readings on every agent at its next heartbeat; the 30-second samples, the memory valve and everything else go on as before.",
+	},
+	{
 		Key: "scheduler.memory_booking_headroom_percent", Label: "Memory booking headroom", Env: "ZOOMIES_MEMORY_BOOKING_HEADROOM_PERCENT", Kind: KindInt, Scope: ScopeInstance, Live: true,
 		Summary: "How much more than the ninetieth percentile of a job's recent peaks a runner is booked for under history booking, in percent (0-100).",
 	},

@@ -130,7 +130,7 @@ func (a *Agent) ReconcileOnce(ctx context.Context) ([]RunnerReport, error) {
 			// Delivery of a completed removal does not depend on the backend
 			// still answering, or on the startup grace for missing workloads.
 			if !seen[r.runnerID] {
-				reports = append(reports, r.reportAt(now))
+				reports = append(reports, r.report())
 			}
 			continue
 		}
@@ -146,11 +146,12 @@ func (a *Agent) ReconcileOnce(ctx context.Context) ([]RunnerReport, error) {
 			if r.reported {
 				a.untrack(r.runnerID)
 			} else {
-				reports = append(reports, r.reportAt(now))
+				reports = append(reports, r.report())
 			}
 			continue
 		}
 		msg := fmt.Sprintf("workload %s is no longer on host %s", r.handle, a.opts.Name)
+		a.closeWorkingSet(r.runnerID, r.handle, time.Time{}, now)
 		a.markTerminal(r.runnerID, store.RunnerRemoved, backend.PhaseGone, 0, msg, "", now)
 		a.log.Info("runner workload disappeared", "runner", r.runnerID, "handle", r.handle, "backend", r.kind)
 		reports = append(reports, RunnerReport{
@@ -160,12 +161,10 @@ func (a *Agent) ReconcileOnce(ctx context.Context) ([]RunnerReport, error) {
 			Phase:      backend.PhaseGone,
 			Message:    msg,
 			ObservedAt: now,
-			// The kept working-set peak goes with it: the job may have
-			// ended after the last report.
-			Stats: r.reportAt(now).Stats,
 		})
 	}
 
+	a.attachWorkingSets(reports, now)
 	return reports, errors.Join(errs...)
 }
 
@@ -173,7 +172,7 @@ func (a *Agent) ReconcileOnce(ctx context.Context) ([]RunnerReport, error) {
 // that has stopped.
 func (a *Agent) observe(ctx context.Context, b backend.Backend, r tracked, w backend.Workload, now time.Time) (RunnerReport, bool) {
 	if r.hostRemoved {
-		return r.reportAt(now), true
+		return r.report(), true
 	}
 	switch w.Status.Phase {
 	case backend.PhaseExited, backend.PhaseExitUnknown, backend.PhaseFailed, backend.PhaseGone:
@@ -183,6 +182,7 @@ func (a *Agent) observe(ctx context.Context, b backend.Backend, r tracked, w bac
 			return a.cleanUp(ctx, b, r, w, now)
 		}
 		state, msg, fault := terminalOutcome(r, w.Status)
+		a.closeWorkingSet(r.runnerID, r.handle, w.Status.ExitedAt, now)
 		a.markTerminal(r.runnerID, state, w.Status.Phase, w.Status.ExitCode, msg, fault, now)
 		var tail []string
 		if fault != "" || w.Status.ExitCode != 0 {

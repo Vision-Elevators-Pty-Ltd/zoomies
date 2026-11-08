@@ -1102,6 +1102,9 @@ func (c *Controller) Heartbeat(ctx context.Context, hostID string, req agent.Hea
 		ElasticCPU:         elasticCPU,
 		ElasticMemory:      elasticMemory,
 		UpdateHeld:         updateHeld,
+		// The 10-second working-set readings, stopped live where they cost
+		// a host's daemon more than they are worth.
+		WorkingSetSamplingOff: c.cfg().Scheduler.WorkingSetSampling == "off",
 	}, nil
 }
 
@@ -1668,7 +1671,7 @@ func (c *Controller) applyReports(ctx context.Context, hostID string, reports []
 			}
 		}
 		resourcesMoved := false
-		c.recordWorkingSet(ctx, r, rep.Stats)
+		c.recordWorkingSet(ctx, r, rep.WorkingSet)
 		if rep.Stats.SampledAt != nil || rep.Stats.CPUPercent != 0 || rep.Stats.MemoryBytes != 0 {
 			sample, _ := json.Marshal(rep.Stats)
 			// Read against the sample it is about to replace, which is why it is
@@ -2386,24 +2389,27 @@ func (c *Controller) EmbeddedAgent() *agent.Agent {
 }
 
 // recordWorkingSet raises the working-set peak of the runner's job to what a
-// report carries: the most any of the agent's readings of the runner saw. It
-// is recorded for the job in progress, or for the job the runner has just
-// completed, because an ended runner's last report, which carries the peak the
-// job ended on, can arrive after GitHub has closed the job. Whatever the
-// runner's state on this side.
+// report carries (RunnerReport.WorkingSet): the most any of the agent's
+// readings of the runner saw. It is recorded for the job in progress, or for
+// the job the runner has just completed, because an ended runner's last
+// report can arrive after GitHub has closed the job. Whatever the runner's
+// state on this side.
+//
+// It writes jobs.peak_working_set_mb and nothing else: peak_memory_mb, the
+// runner's sample and everything scheduling reads are untouched, and the
+// history reads the column only under scheduler.working_set_history = on.
 //
 // The job's working set is marked untrusted, and its old figure kept, where
-// the agent says its readings had a gap or failed, where it sent a usage with
-// no working set (an engine that cannot say, an agent sampling the old way),
-// and for a runner that is not ephemeral, whose kept peak may be an earlier
-// job's.
-func (c *Controller) recordWorkingSet(ctx context.Context, r *store.Runner, s backend.Stats) {
-	ws := max(s.WorkingSetPeakBytes, s.WorkingSetBytes) >> 20
-	if ws <= 0 && s.MemoryBytes <= 0 {
+// the agent says its readings did not cover the run, and for a runner that is
+// not ephemeral, whose kept peak may be an earlier job's. A report with no
+// working set (an older agent, or nothing read yet) records nothing.
+func (c *Controller) recordWorkingSet(ctx context.Context, r *store.Runner, ws *agent.WorkingSetReport) {
+	if ws == nil {
 		return
 	}
-	trusted := ws > 0 && !s.WorkingSetIncomplete && r.Ephemeral
-	if err := c.st.RecordJobWorkingSet(ctx, r.ID, ws, trusted, c.Now()); err != nil {
+	mb := ws.PeakBytes >> 20
+	trusted := mb > 0 && !ws.Incomplete && r.Ephemeral
+	if err := c.st.RecordJobWorkingSet(ctx, r.ID, mb, trusted, c.Now()); err != nil {
 		c.log.Debug("could not record a job's working set", "runner", r.ID, "error", err)
 	}
 }

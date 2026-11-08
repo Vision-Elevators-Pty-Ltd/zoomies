@@ -34,7 +34,7 @@ type JobPeak struct {
 	// old way, and below zero for one whose working set is not trusted (the
 	// readings had a gap, failed, or the runner was not ephemeral): both keep
 	// the old figure. PreferWorkingSet decides which figure MemoryMB carries.
-	WorkingSetMB int64 `json:"working_set_mb,omitempty"`
+	WorkingSetMB int64 `json:"-"`
 	// Job names the job the run was of (repo, workflow and job name), for a
 	// pool's history, which mixes jobs: PreferWorkingSet decides each job's
 	// runs on their own. Empty where the runs are all of one job.
@@ -48,8 +48,17 @@ type JobPeak struct {
 // taken from.
 const WorkingSetMinRuns = 5
 
-// PreferWorkingSet is runs as the history should read them, newest first as
-// given, decided job by job (JobPeak.Job; runs with none are one job).
+// PreferWorkingSet is runs as the history should read them under
+// scheduler.working_set_history = on, newest first as given, decided job by
+// job (JobPeak.Job; runs with none are one job). The store's histories return
+// every run at its usage peak (MemoryMB is peak_memory_mb) and never call it;
+// the controller does, and only with the setting on, so with it off the
+// history is exactly what it was before the working set was recorded.
+//
+// Known open findings, which is why the setting is off: a switched job drops
+// its untrusted (-1) runs, recent heavy ones included; distrust that arrives
+// after WorkingSetLateReport cannot reach a completed job; and a job is named
+// by its repository, workflow and job display names, which can collide.
 //
 // Once at least WorkingSetMinRuns of a job's runs carry a trusted working-set
 // peak, that job's runs that do are kept with MemoryMB set to it, and its runs
@@ -246,15 +255,7 @@ func (s *Store) jobUsageHistory(ctx context.Context, repo, workflow, job string,
 			out[k] = append(out[k], p)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for k, peaks := range out {
-		if k.Repo == repo && k.Workflow == workflow && k.JobName == job {
-			out[k] = PreferWorkingSet(peaks)
-		}
-	}
-	return nil
+	return rows.Err()
 }
 
 // poolUsageHistorySQL is a const so a query-plan test can pin the statement
@@ -299,9 +300,6 @@ func (s *Store) PoolUsageHistory(ctx context.Context, poolIDs []string, limit in
 		rows.Close()
 		if err != nil {
 			return nil, err
-		}
-		if peaks, ok := out[id]; ok {
-			out[id] = PreferWorkingSet(peaks)
 		}
 	}
 	return out, nil

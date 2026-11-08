@@ -69,9 +69,26 @@ func (s *Store) RecordJobAttentionRun(ctx context.Context, repo string, run int6
 	return err
 }
 
-func (s *Store) PruneJobAttentionRuns(ctx context.Context) error {
-	_, err := s.exec(ctx, `DELETE FROM job_attention_runs WHERE NOT EXISTS
-		(SELECT 1 FROM jobs WHERE jobs.repo=job_attention_runs.repo AND jobs.github_run_id=job_attention_runs.run_id
-		AND jobs.queued_at >= ?)`, ms(s.Now().Add(-AttentionWindow)))
-	return err
+// pruneJobAttentionRunsSQL is a const so a query-plan test can pin it. The
+// subquery must seek idx_jobs_run by run and repository: written plainly, the
+// planner preferred idx_jobs_repo (repository and queued_at) and walked every
+// job of the repository in the window for each row, which took 75 s on the
+// live controller's 1,457 rows (8 Nov 2026) and never finished inside the
+// sweep's budget. The unary plus keeps queued_at out of the index choice.
+const pruneJobAttentionRunsSQL = `DELETE FROM job_attention_runs WHERE NOT EXISTS
+	(SELECT 1 FROM jobs WHERE jobs.github_run_id=job_attention_runs.run_id AND jobs.repo=job_attention_runs.repo
+	AND +jobs.queued_at >= ?)`
+
+// PruneJobAttentionRuns forgets the GitHub checks of runs with no job left in
+// the attention window, and says how many it forgot.
+func (s *Store) PruneJobAttentionRuns(ctx context.Context) (int64, error) {
+	res, err := s.exec(ctx, pruneJobAttentionRunsSQL, ms(s.Now().Add(-AttentionWindow)))
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }

@@ -289,12 +289,9 @@ func TestTheAttentionLoopSaysWhyItCouldNotDoItsWork(t *testing.T) {
 		{"recording the answer", "could not record what GitHub said about a failed run",
 			func(cancel context.CancelFunc, fake *attentionFake) { fake.onAsk = cancel }},
 		{"pruning what is no longer needed", "could not prune the records of runs checked on GitHub",
-			// A refusal for quota records nothing, so the tick reaches its last
-			// step with the context cancelled by then.
-			func(cancel context.CancelFunc, fake *attentionFake) {
-				fake.onAsk = cancel
-				fake.runErr = &github.RateLimitedError{ResetAt: time.Now().Add(time.Hour)}
-			}},
+			// The prune is the tick's first step, on a budget of its own
+			// (finding 65), so a tick whose context is already gone fails it.
+			func(cancel context.CancelFunc, _ *attentionFake) { cancel() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -345,5 +342,61 @@ func TestTheAttentionCheckRecordsWhatStartedAFailedRun(t *testing.T) {
 				t.Fatalf("the failed run's event reads %q (%v), want %q", got.RunEvent, err, event)
 			}
 		})
+	}
+}
+
+// slowAttention is a GitHub that answers no run check before the caller gives
+// up: what made every sweep's prune fail (finding 65).
+type slowAttention struct {
+	attentionFake
+	asked *int
+}
+
+func (f slowAttention) GetWorkflowRun(ctx context.Context, _ string, _ int64) (*github.WorkflowRunState, error) {
+	*f.asked++
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// Finding 65: a GitHub batch that spends the sweep's whole budget no longer
+// starves the prune. It runs first, on a budget of its own, and forgets the
+// record of a run with no job left in the window; before, it ran on the
+// expired budget and logged a WARN every 30 s for a week.
+func TestASlowGitHubBatchStillPrunesTheAttentionRecords(t *testing.T) {
+	saved := jobAttentionCheckTimeout
+	jobAttentionCheckTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { jobAttentionCheckTimeout = saved })
+
+	h := newHarness(t)
+	inst := h.installation()
+	asked := 0
+	fake := slowAttention{attentionFake: attentionFake{repairFake: &repairFake{Client: h.gh.Client(inst.Target, inst.TargetType), check: "waiting"}}, asked: &asked}
+	h.c.clients.entries[inst.ID] = &clientEntry{client: fake, updatedAt: inst.UpdatedAt.Truncate(time.Millisecond)}
+	repo := inst.Target + "/repo"
+	job := &store.Job{GitHubJobID: 1, GitHubRunID: 9, Repo: repo, State: store.JobCompleted, Conclusion: "failure", QueuedAt: h.st.Now().Add(-time.Minute)}
+	if _, err := h.st.UpsertJob(h.ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	// The record of a run with no job left in the window: the prune's work.
+	if err := h.st.RecordJobAttentionRun(h.ctx, repo, 77, "", h.st.Now(), true); err != nil {
+		t.Fatal(err)
+	}
+	var logged bytes.Buffer
+	h.c.log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	started := time.Now()
+	h.c.refreshJobAttention(h.ctx)
+	if asked == 0 {
+		t.Fatal("the sweep asked GitHub nothing; the test needs a slow batch")
+	}
+	if took := time.Since(started); took < jobAttentionCheckTimeout {
+		t.Fatalf("the sweep took %v; the slow batch should have spent its %v", took, jobAttentionCheckTimeout)
+	}
+	out := logged.String()
+	if strings.Contains(out, "could not prune") {
+		t.Fatalf("the prune failed behind a slow batch:\n%s", out)
+	}
+	if !strings.Contains(out, "pruned the records of runs checked on GitHub") || !strings.Contains(out, "records=1") {
+		t.Fatalf("the stale record was not pruned:\n%s", out)
 	}
 }

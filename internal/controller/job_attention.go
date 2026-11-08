@@ -25,8 +25,27 @@ func (c *Controller) jobAttentionLoop(ctx context.Context) {
 	}
 }
 
+// The budgets of one job-attention sweep. Variables so a test can make a slow
+// GitHub batch run out of its budget without waiting twenty seconds.
+var (
+	// jobAttentionPruneTimeout bounds the prune, a single indexed DELETE.
+	jobAttentionPruneTimeout = 5 * time.Second
+	// jobAttentionCheckTimeout bounds the GitHub checks of one batch.
+	jobAttentionCheckTimeout = 20 * time.Second
+)
+
 func (c *Controller) refreshJobAttention(parent context.Context) {
-	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
+	// The prune goes first, on a budget of its own: after the GitHub checks
+	// it ran on whatever of their budget they left, which a slow batch
+	// spent, and it then failed every pass (finding 65).
+	pctx, pcancel := context.WithTimeout(parent, jobAttentionPruneTimeout)
+	if n, err := c.st.PruneJobAttentionRuns(pctx); err != nil {
+		c.log.Warn("could not prune the records of runs checked on GitHub", "error", err)
+	} else if n > 0 {
+		c.log.Debug("pruned the records of runs checked on GitHub", "records", n)
+	}
+	pcancel()
+	ctx, cancel := context.WithTimeout(parent, jobAttentionCheckTimeout)
 	defer cancel()
 	runs, err := c.st.JobAttentionRunsToCheck(ctx, 5)
 	if err != nil {
@@ -50,9 +69,6 @@ func (c *Controller) refreshJobAttention(parent context.Context) {
 			c.log.Warn("could not record what GitHub said about a failed run", "repo", run.Repo, "run", run.RunID, "error", err)
 			return
 		}
-	}
-	if err := c.st.PruneJobAttentionRuns(ctx); err != nil {
-		c.log.Warn("could not prune the records of runs checked on GitHub", "error", err)
 	}
 }
 

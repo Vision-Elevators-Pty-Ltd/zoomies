@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -32,20 +33,26 @@ func TestASwitchedJobKeepsItsRecentUnmeasuredRunsAtTheirOldFigure(t *testing.T) 
 	}
 
 	// Newest first: measured, then an older agent's run (0), then measured,
-	// then a provisional peak, then records from before any measurement.
+	// then a provisional peak, then records from before any measurement: two
+	// of the measured runs' own workflow file (replaced), one whose file is
+	// unknown and one whose name its run shared (both kept: review of #22,
+	// finding 2).
+	ci := ".github/workflows/ci.yml"
 	mixed := []JobPeak{
 		measured(JobPeak{MemoryMB: 4000, WorkingSetMB: 1000}),
 		{MemoryMB: 7000},
 		measured(JobPeak{MemoryMB: 4000, WorkingSetMB: 1000}),
-		{MemoryMB: 6000, WorkingSetMB: 900, WorkflowPath: ".github/workflows/ci.yml"}, // not final
+		{MemoryMB: 6000, WorkingSetMB: 900, WorkflowPath: ci}, // not final
 		measured(JobPeak{MemoryMB: 4000, WorkingSetMB: 1000}),
 		measured(JobPeak{MemoryMB: 4000, WorkingSetMB: 1000}),
 		measured(JobPeak{MemoryMB: 4000, WorkingSetMB: 1000}),
-		{MemoryMB: 9000},
-		{MemoryMB: 9000},
+		{MemoryMB: 9000, WorkflowPath: ci},
+		{MemoryMB: 9100},
+		{MemoryMB: 9000, WorkflowPath: ci},
+		{MemoryMB: 9200, WorkflowPath: ci, SharedName: true},
 	}
 	got = PreferWorkingSet(mixed)
-	want := []int64{1000, 7000, 1000, 6000, 1000, 1000, 1000}
+	want := []int64{1000, 7000, 1000, 6000, 1000, 1000, 1000, 9100, 9200}
 	if len(got) != len(want) {
 		t.Fatalf("history = %+v, want %v", got, want)
 	}
@@ -225,5 +232,98 @@ func TestTheHistoriesIdentityColumnsSeekTheirIndexes(t *testing.T) {
 		if strings.Contains(joined, "SCAN") || !strings.Contains(joined, "idx_jobs_run") || !strings.Contains(joined, "SEARCH runs USING PRIMARY KEY") {
 			t.Fatalf("plan:\n%s", joined)
 		}
+	}
+}
+
+// Review of #22 (abaa0f24), finding 2, the review's probe made permanent:
+// five newer runs of light.yml, identified and measured at 512 MiB, beside
+// fifteen older 16 GiB runs under the same repository, workflow and job names
+// whose workflow file the run lookup never learnt. Switching dropped all
+// fifteen, and the pool's booking and the job's raise fell from 20,480 to
+// 640 MiB: an unknown older row may be another, heavy definition sharing those
+// display names, and five light runs cannot say otherwise. Through the real
+// histories, the fifteen are now kept at 16 GiB; only older runs proven to be
+// light.yml's own (its file, a name of their own) are replaced.
+func TestFiveIdentifiedLightRunsDoNotEraseUnidentifiedHeavyHistory(t *testing.T) {
+	const light = ".github/workflows/light.yml"
+	for _, tc := range []struct {
+		name string
+		// identifyOld names the older heavy runs' identity: "" leaves their
+		// workflow file unknown.
+		oldPath   string
+		oldShared bool
+		wantRuns  int
+		wantHeavy int
+		// wantLightMB is what the five light runs read: their working set
+		// where the job switches, their old figure where it does not.
+		wantLightMB int64
+	}{
+		{"older runs of an unknown workflow file", "", false, 20, 15, 512},
+		// Two workflow files under one name: the job does not switch at all.
+		{"older runs of another workflow file", ".github/workflows/heavy.yml", false, 20, 15, 2048},
+		{"older runs of light.yml whose name their run shared", light, true, 20, 15, 512},
+		{"older runs proven to be light.yml's own", light, false, 5, 0, 512},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			for i := range 20 {
+				runner := fmt.Sprintf("run_%02d", i)
+				usageJob(t, s, i+1, "build", "pool_a", runner, JobCompleted, versionsEpoch.Add(time.Duration(i)*time.Minute))
+				heavy := i < 15
+				mb, ws, final := int64(16384), int64(0), 0
+				if !heavy {
+					mb, ws, final = 2048, 512, 1
+				}
+				if _, err := s.write.ExecContext(ctx, `UPDATE jobs SET peak_memory_mb = ?, peak_working_set_mb = ?, working_set_final = ?,
+					github_run_id = github_job_id + 900000 WHERE runner_id = ?`, mb, ws, final, runner); err != nil {
+					t.Fatal(err)
+				}
+				switch {
+				case !heavy:
+					identify(t, s, runner, light)
+				case tc.oldPath != "":
+					identify(t, s, runner, tc.oldPath)
+				}
+				if heavy && tc.oldShared {
+					// another job of the same name in the same run attempt
+					usageJob(t, s, 100+i, "build", "pool_b", runner+"_twin", JobCompleted, versionsEpoch.Add(-time.Hour))
+					if _, err := s.write.ExecContext(ctx, `UPDATE jobs SET github_run_id = (SELECT github_run_id FROM jobs WHERE runner_id = ?) WHERE runner_id = ?`, runner, runner+"_twin"); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			k := JobUsageKey{Repo: "eyupio/zoomies", Workflow: "CI", JobName: "build"}
+			jobs, err := s.JobUsageHistory(ctx, []JobUsageKey{k})
+			if err != nil {
+				t.Fatal(err)
+			}
+			k.PoolID = "pool_a"
+			pools, err := s.PoolUsageHistory(ctx, []string{"pool_a"}, 20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, runs := range map[string][]JobPeak{"job": jobs[k], "pool": pools["pool_a"]} {
+				if len(runs) != 20 {
+					t.Fatalf("%s history has %d runs, want 20", name, len(runs))
+				}
+				got := PreferWorkingSet(runs)
+				heavy, light := 0, 0
+				for _, p := range got {
+					switch p.MemoryMB {
+					case 16384:
+						heavy++
+					case tc.wantLightMB:
+						light++
+					default:
+						t.Fatalf("%s history read a run as %+v", name, p)
+					}
+				}
+				if len(got) != tc.wantRuns || heavy != tc.wantHeavy || light != 5 {
+					t.Fatalf("%s history switched to %d runs, %d at 16 GiB and %d light at %d MiB; want %d, %d and 5",
+						name, len(got), heavy, light, tc.wantLightMB, tc.wantRuns, tc.wantHeavy)
+				}
+			}
+		})
 	}
 }

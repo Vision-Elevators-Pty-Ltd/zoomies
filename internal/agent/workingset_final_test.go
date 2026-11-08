@@ -125,10 +125,125 @@ func TestAnUnknownStartAfterAReadingIsIncomplete(t *testing.T) {
 	if !r.workingSetIncomplete {
 		t.Fatal("a reading before an unknown start was taken as covered")
 	}
+	// With no reading yet the start is still unknown: whatever ran between
+	// the container's real start and now went unread, as far as anyone can
+	// tell, so the baseline cannot be established (review of #22, finding 1).
 	fresh := &tracked{runnerID: "r", handle: "h", phase: backend.PhaseRunning}
 	fresh.startWorkingSet(time.Time{}, now)
-	if fresh.workingSetIncomplete || !fresh.runningSince.Equal(now) {
-		t.Fatalf("an unknown start with no reading yet: %+v", fresh)
+	if !fresh.workingSetIncomplete || !fresh.runningSince.Equal(now) {
+		t.Fatalf("an unknown start with no reading yet was taken as covered: %+v", fresh)
+	}
+}
+
+// Review of #22 (abaa0f24), finding 1: a runner whose end was the first thing
+// the agent saw of it, or that a remove task took before it was first observed
+// running, bypassed markRunning, so its start-to-first-reading interval was
+// never checked, and a 60-second blind start went out as a complete, final
+// 512 MiB peak. The baseline is now established and checked before every
+// final verdict. These are the review's probes, through the real create,
+// sample, reconcile and remove paths, in both lifecycle orderings.
+func TestTheStartIsCheckedBeforeEveryFinalVerdict(t *testing.T) {
+	// created, read, then its end is the first thing observed of it
+	firstSeenEnded := func(t *testing.T, delay time.Duration, knownStart bool) *WorkingSetReport {
+		a, _, be, clock := newAgent(t, 1)
+		start := clock.Now()
+		a.handleCreate(context.Background(), createTask("create", "r"), func() {})
+		r, ok := a.snapshot("r")
+		if !ok {
+			t.Fatal("create failed")
+		}
+		clock.advance(delay)
+		w := running(r.handle, "r")
+		be.setWorkloads(w)
+		be.stats = backend.Stats{MemoryBytes: 8192 << 20, WorkingSetBytes: 512 << 20, Containers: []string{string(r.handle)}}
+		a.sampleStats(context.Background())
+		clock.advance(5 * time.Second)
+		end := exited(r.handle, "r", 0)
+		if knownStart {
+			end.Status.StartedAt = start
+		}
+		end.Status.ExitedAt = clock.Now()
+		be.setWorkloads(end)
+		reps, err := a.ReconcileOnce(context.Background())
+		if err != nil || len(reps) != 1 {
+			t.Fatalf("reconcile: %v %v", reps, err)
+		}
+		return reps[0].WorkingSet
+	}
+	// created, read, then removed by a task before it was first observed
+	removedUnseen := func(t *testing.T, delay time.Duration) *WorkingSetReport {
+		a, tr, be, clock := newAgent(t, 1)
+		a.handleCreate(context.Background(), createTask("create", "r"), func() {})
+		r, ok := a.snapshot("r")
+		if !ok {
+			t.Fatal("create failed")
+		}
+		clock.advance(delay)
+		be.setWorkloads(running(r.handle, "r"))
+		be.stats = backend.Stats{MemoryBytes: 8192 << 20, WorkingSetBytes: 512 << 20, Containers: []string{string(r.handle)}}
+		a.sampleStats(context.Background())
+		a.handleRemove(context.Background(), Task{ID: "remove", RunnerID: "r", Kind: TaskRemoveRunner}, func() {})
+		return removeResult(t, tr).WorkingSet
+	}
+	// created, read, then gone from the host before it was first observed
+	vanishedUnseen := func(t *testing.T) *WorkingSetReport {
+		a, _, be, clock := newAgent(t, 1)
+		a.handleCreate(context.Background(), createTask("create", "r"), func() {})
+		r, ok := a.snapshot("r")
+		if !ok {
+			t.Fatal("create failed")
+		}
+		clock.advance(10 * time.Second)
+		be.setWorkloads(running(r.handle, "r"))
+		be.stats = backend.Stats{MemoryBytes: 8192 << 20, WorkingSetBytes: 512 << 20, Containers: []string{string(r.handle)}}
+		a.sampleStats(context.Background())
+		be.setWorkloads()
+		clock.advance(missingGrace + time.Second)
+		reps, err := a.ReconcileOnce(context.Background())
+		if err != nil || len(reps) != 1 {
+			t.Fatalf("reconcile: %v %v", reps, err)
+		}
+		return reps[0].WorkingSet
+	}
+
+	for _, tc := range []struct {
+		name       string
+		ws         func(t *testing.T) *WorkingSetReport
+		incomplete bool
+	}{
+		{"first seen ended, read 60 s after its start", func(t *testing.T) *WorkingSetReport { return firstSeenEnded(t, 60*time.Second, true) }, true},
+		{"first seen ended, read 20 s after its start", func(t *testing.T) *WorkingSetReport { return firstSeenEnded(t, 20*time.Second, true) }, false},
+		{"first seen ended, its start unknown", func(t *testing.T) *WorkingSetReport { return firstSeenEnded(t, 20*time.Second, false) }, true},
+		{"removed before it was first seen, read 60 s in", func(t *testing.T) *WorkingSetReport { return removedUnseen(t, 60*time.Second) }, true},
+		{"removed before it was first seen, read 5 s in", func(t *testing.T) *WorkingSetReport { return removedUnseen(t, 5*time.Second) }, true},
+		{"gone from the host before it was first seen", vanishedUnseen, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := tc.ws(t)
+			if ws == nil || !ws.Final || ws.PeakBytes != 512<<20 || ws.Incomplete != tc.incomplete {
+				t.Fatalf("final working set %+v; want the 512 MiB peak, final, incomplete %v", ws, tc.incomplete)
+			}
+		})
+	}
+}
+
+// The same holds for a runner that was observed running: its baseline was
+// established then, and the final verdict judges the end. A runner observed
+// running without a start from the daemon was never covered from its start.
+func TestARunnerObservedWithoutAStartIsNeverAFinalMeasurement(t *testing.T) {
+	a, tr, be, clock := newAgent(t, 1)
+	a.handleCreate(context.Background(), createTask("create", "r"), func() {})
+	r, _ := a.snapshot("r")
+	be.setWorkloads(running(r.handle, "r")) // no StartedAt
+	if _, err := a.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	be.stats = backend.Stats{MemoryBytes: 1 << 30, WorkingSetBytes: 256 << 20, Containers: []string{string(r.handle)}}
+	clock.advance(5 * time.Second)
+	a.sampleStats(context.Background())
+	a.handleRemove(context.Background(), Task{ID: "remove", RunnerID: "r", Kind: TaskRemoveRunner}, func() {})
+	if ws := removeResult(t, tr).WorkingSet; ws == nil || !ws.Final || !ws.Incomplete {
+		t.Fatalf("final working set %+v; want an incomplete final verdict", ws)
 	}
 }
 
@@ -180,5 +295,20 @@ func TestOnlyAJudgedEndIsFinal(t *testing.T) {
 	reps, _ = a.ReconcileOnce(context.Background())
 	if len(reps) != 1 || reps[0].WorkingSet == nil || !reps[0].WorkingSet.Final || reps[0].WorkingSet.Incomplete {
 		t.Fatalf("an exited runner's report: %+v", reps[0].WorkingSet)
+	}
+}
+
+// removeResult is the remove task's result, past the create's.
+func removeResult(t *testing.T, tr *fakeTransport) TaskResult {
+	t.Helper()
+	for {
+		select {
+		case res := <-tr.results:
+			if res.TaskID == "remove" {
+				return res
+			}
+		default:
+			t.Fatal("the remove task sent no result")
+		}
 	}
 }

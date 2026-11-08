@@ -145,3 +145,25 @@ func TestRecentUntrustedHeavyRunsStillBookAfterTheSwitch(t *testing.T) {
 		t.Fatalf("booking %d -> %d MiB, history_raise %d -> %d MiB: the untrusted heavy runs were dropped", before, after, beforeRaise, afterRaise)
 	}
 }
+
+// Review of #22 (abaa0f24), finding 2, in the scheduler: five identified
+// light runs at 512 MiB and fifteen older 16 GiB runs whose workflow file is
+// unknown. The booking and the raise both fell from 20,480 to 640 MiB when the
+// switch dropped the fifteen; they now stay where they were.
+func TestIdentifiedLightRunsKeepAnUnidentifiedHeavyJobsBookingAndRaise(t *testing.T) {
+	var peaks []store.JobPeak
+	for range 5 {
+		peaks = append(peaks, store.JobPeak{MemoryMB: 2048, WorkingSetMB: 512, WorkingSetFinal: true, WorkflowPath: ".github/workflows/light.yml"})
+	}
+	for range 15 {
+		peaks = append(peaks, store.JobPeak{MemoryMB: 16384})
+	}
+	switched := store.PreferWorkingSet(peaks)
+	bookBefore, _ := historyBooking(peaks, 25)
+	bookAfter, _ := historyBooking(switched, 25)
+	raiseBefore, _ := raiseNeedMB(peaks, 25)
+	raiseAfter, _ := raiseNeedMB(switched, 25)
+	if bookBefore != 20480 || bookAfter != bookBefore || raiseBefore != 20480 || raiseAfter != raiseBefore {
+		t.Fatalf("booking %d -> %d MiB, raise %d -> %d MiB; want 20,480 throughout", bookBefore, bookAfter, raiseBefore, raiseAfter)
+	}
+}

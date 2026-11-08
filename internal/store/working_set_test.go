@@ -12,7 +12,9 @@ import (
 // working set, and a run the kernel killed is kept whatever it was measured
 // with. Untrusted runs (below zero) never count.
 func TestPreferWorkingSetSwitchesOnlyOnceEnoughTrustedRunsHaveIt(t *testing.T) {
-	old := func(mb int64) JobPeak { return JobPeak{MemoryMB: mb} }
+	// Runs measured only the old way, of the measured runs' own workflow file:
+	// once the job switches, the older of them are replaced.
+	old := func(mb int64) JobPeak { return JobPeak{MemoryMB: mb, WorkflowPath: ".github/workflows/ci.yml"} }
 	ws := func(mb, w int64) JobPeak { return measured(JobPeak{MemoryMB: mb, WorkingSetMB: w}) }
 	killed := JobPeak{MemoryMB: 15000, OOMKilled: true, GrantedMemoryMB: 16384}
 

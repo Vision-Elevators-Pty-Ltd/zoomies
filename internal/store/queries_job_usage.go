@@ -79,9 +79,15 @@ const WorkingSetMinRuns = 5
 // other run is kept at its old figure, which is never smaller (an untrusted or
 // provisional peak, a run on an older agent, a run whose job is not
 // identified), except a run measured only the old way that is older than every
-// measured run: a record from before the working set was measured at all,
-// which the measured runs since have replaced. A job that does not switch
-// keeps every run as it was.
+// measured run and proven to be of the same definition as the measured runs:
+// it names their workflow file and no other job of its run shared its name. That
+// is a record from before the working set was measured at all, which the
+// measured runs since have replaced. An older run whose workflow file is
+// unknown, or whose name was shared, may be another definition under the same
+// display names, and the measured runs say nothing of it: it keeps its old
+// figure, however heavy, until it ages out of the history (review of #22,
+// finding 2: five identified 512 MiB runs had erased fifteen unidentified
+// 16 GiB ones). A job that does not switch keeps every run as it was.
 //
 // A run the kernel killed for memory is always kept as it was: the limit it
 // hit is the one figure known to have been too little.
@@ -125,8 +131,9 @@ func PreferWorkingSet(peaks []JobPeak) []JobPeak {
 		case WorkingSetMeasured(p):
 			p.MemoryMB = p.WorkingSetMB
 			out = append(out, p)
-		case p.WorkingSetMB == 0 && i > c.oldest:
-			// From before the working set was measured: replaced.
+		case p.WorkingSetMB == 0 && i > c.oldest && p.WorkflowPath == c.path && !p.SharedName:
+			// From before the working set was measured, and of the very
+			// definition the measured runs are of: replaced.
 		default:
 			out = append(out, p)
 		}

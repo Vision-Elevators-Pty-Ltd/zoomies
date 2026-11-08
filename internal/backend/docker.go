@@ -1186,7 +1186,7 @@ func (b *DockerBackend) MemoryUsage(ctx context.Context, container string) (Memo
 		}
 		return MemoryReading{}, fmt.Errorf("backend: reading the memory of container %s: %w", shortID(container), err)
 	}
-	return MemoryReading{UsageBytes: s.MemoryBytes, LimitBytes: s.MemoryLimit, SampledAt: time.Now()}, nil
+	return MemoryReading{UsageBytes: s.MemoryBytes, LimitBytes: s.MemoryLimit, WorkingSetBytes: s.WorkingSetBytes, SampledAt: time.Now()}, nil
 }
 
 // RaiseMemory raises a live container's memory limit, and the swap it may use
@@ -1909,6 +1909,12 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		r := <-runner
 		if r.err == nil {
 			r.stats.Scratch, r.stats.ScratchUnmeasured = collectScratch(measured)
+			r.stats.Containers = []string{string(h)}
+			if err != nil || insp.Config == nil {
+				// Whether this runner is half of a pair is not known, so
+				// neither is its working set: the sidecar may hold most of it.
+				r.stats.WorkingSetBytes = 0
+			}
 		}
 		return r.stats, r.err
 	}
@@ -1917,6 +1923,8 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		r := <-runner
 		if r.err == nil {
 			r.stats.Scratch, r.stats.ScratchUnmeasured = collectScratch(measured)
+			r.stats.Containers = []string{string(h)}
+			r.stats.WorkingSetBytes = 0 // a pair whose sidecar cannot be found
 		}
 		return r.stats, r.err
 	}
@@ -1929,8 +1937,13 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 	type half struct {
 		stats  Stats
 		labels map[string]string
+		id     string
 	}
 	var halves []half
+	// A pair's working set is the runner's and its sidecar's together, so
+	// it is known only when the sidecar was found and read. Everything else
+	// in the sample is what it always was.
+	sidecarMissing := len(sidecars) == 0
 	for _, sidecar := range sidecars {
 		// The image store is the sidecar's folder, measured in the sidecar. One
 		// inspect per sample, for a pair only, and it is asked before the stats
@@ -1940,12 +1953,13 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		}
 		sampled, err := b.api.ContainerStats(ctx, sidecar.ID)
 		if errors.Is(err, ErrNotFound) {
+			sidecarMissing = true
 			continue
 		}
 		if err != nil {
 			return Stats{}, err
 		}
-		halves = append(halves, half{Stats(sampled), sidecar.Labels})
+		halves = append(halves, half{Stats(sampled), sidecar.Labels, sidecar.ID})
 	}
 	r := <-runner
 	if r.err != nil {
@@ -1953,6 +1967,7 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 	}
 	out := r.stats
 	out.Scratch, out.ScratchUnmeasured = collectScratch(measured)
+	out.Containers = []string{string(h)}
 	busiest := halfPercent(out.CPUPercent, insp.Config.Labels)
 	runnerHalf := halfUse(out, insp.Config.Labels)
 	var daemonHalf *HalfUse
@@ -1961,8 +1976,12 @@ func (b *DockerBackend) Stats(ctx context.Context, h Handle) (Stats, error) {
 		use := halfUse(h.stats, h.labels)
 		daemonHalf = &use
 		out = addStats(out, h.stats)
+		out.Containers = append(out.Containers, h.id)
 	}
 	out.BusiestHalfPercent = busiest
+	if sidecarMissing {
+		out.WorkingSetBytes = 0
+	}
 	if daemonHalf != nil {
 		out.Halves = &PairHalves{Runner: runnerHalf, Daemon: *daemonHalf}
 	}
@@ -1979,7 +1998,7 @@ func halfUse(s Stats, labels map[string]string) HalfUse {
 	if limit == 0 {
 		limit = s.MemoryLimit
 	}
-	return HalfUse{CPUs: s.CPUPercent / 100, CPULimit: res.CPUs, MemoryBytes: s.MemoryBytes, MemoryLimit: limit}
+	return HalfUse{CPUs: s.CPUPercent / 100, CPULimit: res.CPUs, MemoryBytes: s.MemoryBytes, MemoryLimit: limit, WorkingSetBytes: s.WorkingSetBytes}
 }
 
 // halfPercent is a container's CPU use as a share of the quota it was created
@@ -1996,6 +2015,13 @@ func addStats(a, b Stats) Stats {
 	a.CPUPercent += b.CPUPercent
 	a.MemoryBytes += b.MemoryBytes
 	a.MemoryLimit += b.MemoryLimit
+	// A pair's working set is known only if both halves' are: one half's
+	// alone would read as the whole runner using less than it does.
+	if a.WorkingSetBytes > 0 && b.WorkingSetBytes > 0 {
+		a.WorkingSetBytes += b.WorkingSetBytes
+	} else {
+		a.WorkingSetBytes = 0
+	}
 	if a.SampledAt == nil || b.SampledAt != nil && b.SampledAt.After(*a.SampledAt) {
 		a.SampledAt = b.SampledAt
 	}

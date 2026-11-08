@@ -105,6 +105,18 @@ type Stats struct {
 	CPUPercent  float64 `json:"cpu_percent"`
 	MemoryBytes int64   `json:"memory_bytes"`
 	MemoryLimit int64   `json:"memory_limit,omitempty"`
+	// WorkingSetBytes is the memory the container cannot give back without
+	// being killed: MemoryBytes less the page cache the kernel would drop
+	// first (WorkingSetOf). MemoryBytes is the cgroup's usage less only its
+	// inactive file cache, Docker's own figure, and keeps every file page a
+	// build has read twice: an idle runner measured 90 MB of active file cache
+	// beside 66 MB of its own memory. Zero where the engine did not say (an
+	// older engine, cgroup v1, the process backend): unknown, not empty.
+	WorkingSetBytes int64 `json:"working_set_bytes,omitempty"`
+	// Containers is the containers the sample added up, the runner first and
+	// then a docker-in-docker pair's sidecar: what the agent's faster memory
+	// samples read between two of these. In the agent only, never sent.
+	Containers []string `json:"-"`
 	// CPUAllocationFactor is filled by the agent. One is the creation quota;
 	// above one is elastic CPU and below one is host-pressure throttling.
 	CPUAllocationFactor float64 `json:"cpu_allocation_factor,omitempty"`
@@ -182,6 +194,8 @@ type HalfUse struct {
 	CPULimit    float64 `json:"cpu_limit,omitempty"`
 	MemoryBytes int64   `json:"memory_bytes"`
 	MemoryLimit int64   `json:"memory_limit,omitempty"`
+	// WorkingSetBytes is Stats.WorkingSetBytes for this container alone.
+	WorkingSetBytes int64 `json:"working_set_bytes,omitempty"`
 }
 
 // Info describes a backend's capabilities on this particular host. The agent
@@ -526,9 +540,12 @@ type MemoryReading struct {
 	// UsageBytes is the working set -- the memory without the page cache the
 	// kernel gives back when asked -- and LimitBytes the limit it is measured
 	// against.
-	UsageBytes int64     `json:"usage_bytes"`
-	LimitBytes int64     `json:"limit_bytes"`
-	SampledAt  time.Time `json:"sampled_at"`
+	UsageBytes int64 `json:"usage_bytes"`
+	LimitBytes int64 `json:"limit_bytes"`
+	// WorkingSetBytes is the reading's Stats.WorkingSetBytes: the usage less
+	// all of its reclaimable page cache. Zero where the engine did not say.
+	WorkingSetBytes int64     `json:"working_set_bytes,omitempty"`
+	SampledAt       time.Time `json:"sampled_at"`
 }
 
 // LabelPrefix namespaces the container labels Zoomies writes.

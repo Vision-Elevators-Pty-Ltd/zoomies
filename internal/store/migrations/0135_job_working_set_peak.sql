@@ -1,0 +1,17 @@
+-- The most of a job's working set any sample saw, in MB: the cgroup's usage less
+-- all of its reclaimable page cache (active and inactive file lists and
+-- reclaimable slab, with dirty and writeback pages kept), from agents that
+-- report it (1.4.1-vision.10 and later), sampled every 10 seconds between the
+-- 30-second stats samples. peak_memory_mb beside it keeps Docker's own figure,
+-- usage less inactive file cache only, which counts every file a build has read
+-- twice.
+--
+-- Zero is "not measured this way": every job before this migration, and a job on
+-- an older agent. -1 is "measured, but not to be trusted": the agent's readings
+-- had a gap or failed, or the runner was not ephemeral. The job history prefers
+-- this figure, job by job, once a job has five trusted runs, and keeps the old
+-- one until then.
+--
+-- Rolling back to an older build needs deploy/rollback/0135_job_working_set_peak.down.sql
+-- first: an older build refuses a ledger naming a migration it does not have.
+ALTER TABLE jobs ADD COLUMN peak_working_set_mb INTEGER NOT NULL DEFAULT 0;

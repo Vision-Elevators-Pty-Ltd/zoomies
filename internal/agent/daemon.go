@@ -243,13 +243,17 @@ type Options struct {
 // Everything it does is outbound. Nothing dials an agent.
 type Agent struct {
 	mutationsPaused atomic.Bool
-	boostRenewedAt  time.Time
-	usageSampler    machine.UsageSampler
-	opts            Options
-	log             *slog.Logger
-	tr              Transport
-	clock           func() time.Time
-	heartbtI        time.Duration
+	// workingSetSamplingOff is the controller's word (scheduler.working_set_sampling
+	// = off) that the 10-second working-set readings stop; the full stats
+	// samples go on as before.
+	workingSetSamplingOff atomic.Bool
+	boostRenewedAt        time.Time
+	usageSampler          machine.UsageSampler
+	opts                  Options
+	log                   *slog.Logger
+	tr                    Transport
+	clock                 func() time.Time
+	heartbtI              time.Duration
 	// retention is Options.FinishedRetention: how long a finished runner's
 	// workload outlives its report before the reconciler deletes it.
 	retention time.Duration
@@ -411,12 +415,20 @@ type tracked struct {
 	// stale is said so once and not at every failure.
 	statsMisses int
 
-	state      store.RunnerState
-	phase      backend.Phase
-	stats      backend.Stats
-	exitCode   int
-	message    string
-	observedAt time.Time
+	state store.RunnerState
+	phase backend.Phase
+	stats backend.Stats
+	// The working set's kept peak and coverage (workingset.go): the most any
+	// reading saw, when the last one was, when the container started running,
+	// and whether a gap or a failed reading means the peak may have missed
+	// something.
+	workingSetPeak       int64
+	workingSetLastAt     time.Time
+	runningSince         time.Time
+	workingSetIncomplete bool
+	exitCode             int
+	message              string
+	observedAt           time.Time
 
 	// fault is the classification of a failed end of life. It is kept beside
 	// the message because the heartbeat's copy of this runner is the retry when
@@ -636,8 +648,11 @@ func (a *Agent) Runners() []RunnerReport {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	out := make([]RunnerReport, 0, len(a.runners))
+	now := a.now()
 	for _, r := range a.runners {
-		out = append(out, r.report())
+		rep := r.report()
+		rep.WorkingSet = r.workingSetReport(now)
+		out = append(out, rep)
 	}
 	slices.SortFunc(out, func(x, y RunnerReport) int { return strings.Compare(x.RunnerID, y.RunnerID) })
 	return out
@@ -961,6 +976,7 @@ func (a *Agent) run(ctx context.Context) error {
 	run("tasks", a.taskLoop)
 	run("reconcile", a.reconcileLoop)
 	run("stats", a.statsLoop)
+	run("working-set", a.workingSetLoop)
 	run("watchdog", a.watchdogLoop)
 	run("native-logs", a.nativeLogLoop)
 	run("boost-expiry", a.boostExpiryLoop)
@@ -1104,6 +1120,7 @@ func (a *Agent) heartbeat(ctx context.Context) error {
 	// The beat carried every runner the agent tracks, so the controller now
 	// knows how each finished one ended, and its workload may go.
 	a.mutationsPaused.Store(resp.MutationsPaused)
+	a.workingSetSamplingOff.Store(resp.WorkingSetSamplingOff)
 	a.markReported(runners)
 
 	if !a.ready.Swap(true) {
@@ -2440,6 +2457,9 @@ func (a *Agent) adopt(runnerID string, kind store.BackendKind, w backend.Workloa
 		phase:      w.Status.Phase,
 		observedAt: now,
 		resources:  w.Resources,
+		// Whatever an earlier agent read of it went with that agent, so its
+		// working set can never be a measurement of its whole job.
+		workingSetIncomplete: true,
 	}
 	if a.runners[runnerID].createdAt.IsZero() {
 		a.runners[runnerID].createdAt = now

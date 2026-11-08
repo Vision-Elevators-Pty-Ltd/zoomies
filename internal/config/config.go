@@ -950,6 +950,17 @@ type Scheduler struct {
 	// them on to its limit), covers its charge; so it never admits fewer. Either way the runner's limit, the reserve, the pressure holds
 	// and the CPU holds are unchanged.
 	MemoryAdmission string `yaml:"memory_admission"`
+	// WorkingSetHistory is off or on: whether the job history, and so
+	// booking, history raise and profiles, reads jobs' working-set peaks
+	// (peak_working_set_mb) where enough runs of a job have one. Off, the
+	// default, reads peak_memory_mb exactly as before the column existed;
+	// the column is still recorded. Not to be turned on before the switch's
+	// open findings are fixed (see the setting's summary).
+	WorkingSetHistory string `yaml:"working_set_history"`
+	// WorkingSetSampling is on or off: whether agents read each running
+	// runner's working set every 10 seconds between their 30-second stats
+	// samples. Off stops the readings live, through the next heartbeat.
+	WorkingSetSampling string `yaml:"working_set_sampling"`
 	// MachineLabel names the host label whose value says which machine an agent
 	// is on. Agents with the same value share one memory ceiling (the
 	// machine's booking memory once, against every runner on it) and one
@@ -1359,7 +1370,11 @@ func Default() *Config {
 			// production. Either way the start charges a pass records and the
 			// reduced-size admission check apply.
 			MemoryAdmission: "booked",
-			MachineLabel:    "host",
+			// Recording only: the working set is measured and kept, and
+			// nothing reads it until its switch has been reviewed safe.
+			WorkingSetHistory:  "off",
+			WorkingSetSampling: "on",
+			MachineLabel:       "host",
 			// Everything about size classes is off until an operator turns it
 			// on, and the figures below are what it does when they do. They are
 			// held equal to scheduler.DefaultSizeConfig by a test in the

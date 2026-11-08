@@ -1348,7 +1348,60 @@ func (s statsJSON) sample() StatsSample {
 		mem -= v
 	}
 	out.MemoryBytes = int64(mem)
+	out.WorkingSetBytes = WorkingSetOf(s.MemoryStats.Usage, s.MemoryStats.Stats)
 	return out
+}
+
+// WorkingSetOf is a cgroup's working set from its usage and its memory.stat, as
+// a Docker engine reports them: the usage less all of its file cache on the
+// LRU lists (active_file and inactive_file) and its reclaimable slab, with the
+// dirty and writeback file pages put back, because those cannot be dropped
+// without writing them out first. It is what is left when the kernel has
+// reclaimed everything it can without killing anything:
+//
+//   - anonymous memory, the processes' own;
+//   - shmem, which is /dev/shm and every tmpfs (a pool's in-memory work
+//     folder, a daemon's image store in memory). Shmem pages are swap-backed
+//     and live on the anon LRU lists, not the file ones, so nothing here
+//     subtracts them;
+//   - unevictable pages, kernel stacks, page tables, unreclaimable slab and
+//     socket buffers.
+//
+// Docker's own figure, and MemoryBytes, subtracts inactive_file only. That
+// is enough for a container that read a file once, and not for a build,
+// which reads its sources and toolchain again and again and moves them to
+// the active list. The keys are the same for a rootful and a rootless engine
+// on cgroup v2. Zero, meaning unknown, unless the map is positively cgroup
+// v2's (cgroupV2Stats), and never more than the usage.
+func WorkingSetOf(usage uint64, stats map[string]uint64) int64 {
+	if usage == 0 || !cgroupV2Stats(stats) {
+		return 0
+	}
+	active, inactive := stats["active_file"], stats["inactive_file"]
+	drop := active + inactive + stats["slab_reclaimable"]
+	keep := stats["file_dirty"] + stats["file_writeback"]
+	ws := int64(usage) - int64(drop) + int64(keep)
+	return min(max(ws, 0), int64(usage))
+}
+
+// cgroupV2Stats reports whether a Docker memory.stat map is cgroup v2's. A v1
+// map has active_file and inactive_file too, with its dirty pages under
+// "dirty" and "writeback" and hierarchical totals under total_*, so the file
+// lists alone prove nothing: read as v2, a v1 map's dirty pages would never be
+// added back. v2 is recognised by keys v1 never has (anon, file, file_dirty,
+// file_writeback, slab_reclaimable) and the absence of every total_* key.
+func cgroupV2Stats(stats map[string]uint64) bool {
+	for _, k := range []string{"anon", "file", "active_file", "inactive_file", "file_dirty", "file_writeback", "slab_reclaimable"} {
+		if _, ok := stats[k]; !ok {
+			return false
+		}
+	}
+	for k := range stats {
+		if strings.HasPrefix(k, "total_") {
+			return false
+		}
+	}
+	return true
 }
 
 // splitImageRef separates an image reference into the name the API wants in

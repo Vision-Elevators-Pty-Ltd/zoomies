@@ -241,7 +241,7 @@ func (c *Controller) snapshot(ctx context.Context) (scheduler.Snapshot, error) {
 			}
 		}
 		if h, err := c.st.JobUsageHistory(ctx, keys); err == nil {
-			history = h
+			history = workingSetHistory(c.cfg().Scheduler.WorkingSetHistory, h)
 		} else {
 			c.log.Warn("could not read job history; placing without it this pass", "error", err)
 			// Without the jobs' history a runner would be booked at its
@@ -299,7 +299,22 @@ func (c *Controller) bookingInputs(ctx context.Context, pools []*store.Pool) *sc
 		c.log.Warn("could not read which job each runner is running; booking runners at their size this pass", "error", err)
 		return nil
 	}
-	return &scheduler.BookingInputs{PoolRuns: runs, RunnerJobs: jobs}
+	return &scheduler.BookingInputs{PoolRuns: workingSetHistory(c.cfg().Scheduler.WorkingSetHistory, runs), RunnerJobs: jobs}
+}
+
+// workingSetHistory is a history as scheduling should read it: unchanged, with
+// every run at its usage peak, as before working sets were recorded, unless
+// mode (scheduler.working_set_history) is "on", when each of its histories goes
+// through store.PreferWorkingSet. The one place the setting acts on history.
+func workingSetHistory[K comparable](mode string, h map[K][]store.JobPeak) map[K][]store.JobPeak {
+	if mode != "on" {
+		return h
+	}
+	out := make(map[K][]store.JobPeak, len(h))
+	for k, peaks := range h {
+		out[k] = store.PreferWorkingSet(peaks)
+	}
+	return out
 }
 
 // poolJitter draws one number per pool for the scheduler to spread its

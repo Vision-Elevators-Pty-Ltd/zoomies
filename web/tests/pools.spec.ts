@@ -30,6 +30,33 @@ const createButton = (page: Page) => page.getByRole('button', { name: 'Create po
 const saveButton = (page: Page) => page.getByRole('button', { name: 'Save changes' });
 
 /**
+ * Saves the open editor and returns once the save has finished: the pool's
+ * own PATCH has answered with success and the editor has closed.
+ *
+ * Not "the Save button has gone". While a save is in flight the button shows
+ * a spinner and is named "Working", so the "Save changes" locator stops
+ * matching at the click, long before the write lands. A test that read the
+ * pool back at that point read it before the PATCH (8 Nov 2026, #22's
+ * chromium run: three traces, each GET answered before its PATCH).
+ */
+async function savePoolEdits(page: Page, poolId: string): Promise<void> {
+  // Registered before the click, so a fast answer cannot be missed, and
+  // matched on this pool's path and method alone, so /validate or another
+  // pool's request cannot stand in for it.
+  const answered = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'PATCH' &&
+      new URL(response.url()).pathname === `/api/v1/pools/${poolId}`,
+  );
+  await saveButton(page).click();
+  const response = await answered;
+  expect(response.ok(), 'the pool update succeeded').toBeTruthy();
+  expect(await response.finished()).toBeNull();
+  // The editor closes on ondone(saved), which follows updatePool resolving.
+  await expect(page).not.toHaveURL(/[?&]edit=1(?:[&#]|$)/);
+}
+
+/**
  * One radio in one of the editor's radio groups.
  *
  * By input name and value rather than by accessible name: each option's name
@@ -981,8 +1008,7 @@ test('editing an automatic pool offers elastic CPU in the size section', async (
     await expect(page.getByRole('region', { name: /What will be saved/ })).toContainText(
       'Automatic, up to the host ceiling',
     );
-    await saveButton(page).click();
-    await expect(saveButton(page)).toBeHidden();
+    await savePoolEdits(page, poolId);
 
     // Saved as the controller sees it: an elastic pool, not merely a form
     // that showed the word.
@@ -1036,8 +1062,7 @@ test('the size section offers the memory valve, starts it on observe, and saves 
 
     await expect(section(page, 'size')).toContainText('Edited');
     await expect(section(page, 'size')).toContainText('elastic memory lending');
-    await saveButton(page).click();
-    await expect(saveButton(page)).toBeHidden();
+    await savePoolEdits(page, poolId);
 
     const saved = (await page.request.get(`/api/v1/pools/${poolId}`).then((r) => r.json())) as {
       memory_burst?: { mode?: string; max_memory_mb?: number; spill_mb?: number };
@@ -1049,6 +1074,72 @@ test('the size section offers the memory valve, starts it on observe, and saves 
     await expect(page.getByText('Elastic memory', { exact: true })).toBeVisible();
     await expect(page.getByText(/Automatic, up to 12 GB per runner/)).toBeVisible();
   } finally {
+    if (poolId) await page.request.delete(`/api/v1/pools/${poolId}?force=true`);
+  }
+});
+
+test('a save has finished when its PATCH has answered and the editor has closed, not when the button says Working', async ({
+  page,
+}) => {
+  // The regression check for the race the two size-section tests had: their
+  // PATCH is held at the browser, before it reaches the controller, so the
+  // order is fixed rather than left to timing. While it is held the old wait
+  // (the "Save changes" button gone) is already satisfied and the pool reads
+  // back unchanged; savePoolEdits waits until the write is released and done.
+  const name = `zoomies-e2e-held-${Date.now()}`;
+  let poolId = '';
+  let release: () => void = () => {};
+  try {
+    const created = await page.request.post('/api/v1/pools', {
+      data: { name, installation_id: FIXTURE.installationId, labels: [name] },
+    });
+    expect(created.ok(), 'the plain pool was created').toBeTruthy();
+    poolId = ((await created.json()) as { id: string }).id;
+    const readBack = async () =>
+      (await page.request.get(`/api/v1/pools/${poolId}`).then((r) => r.json())) as {
+        sizing?: string;
+        cpu_burst?: { mode?: string };
+      };
+
+    await goto(page, `/pools/${poolId}?edit=1#size`, name);
+    await page.getByRole('radio', { name: 'Automatic boost' }).check();
+    await expect(section(page, 'size')).toContainText('Edited');
+
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const order: string[] = [];
+    await page.route(`**/api/v1/pools/${poolId}`, async (route) => {
+      if (route.request().method() !== 'PATCH') return route.fallback();
+      order.push('patch held');
+      await gate;
+      order.push('patch released');
+      await route.continue();
+    });
+
+    let finished = false;
+    const saving = savePoolEdits(page, poolId).then(() => {
+      finished = true;
+      order.push('save finished');
+    });
+    // Held: the editor is still open and busy, and what the old wait looked
+    // for is already gone.
+    await expect(page.getByRole('button', { name: 'Working' })).toBeVisible();
+    await expect(saveButton(page)).toBeHidden();
+    expect(order).toEqual(['patch held']);
+    // The negative control: read back now, as the old tests did, and the
+    // pool is as it was.
+    expect((await readBack()).cpu_burst?.mode).toBe('observe');
+    expect(finished, 'savePoolEdits returned while its PATCH was held').toBe(false);
+
+    release();
+    await saving;
+    expect(order).toEqual(['patch held', 'patch released', 'save finished']);
+    const saved = await readBack();
+    expect(saved.cpu_burst?.mode).toBe('automatic');
+    expect(saved.sizing).toBe('elastic');
+  } finally {
+    release();
     if (poolId) await page.request.delete(`/api/v1/pools/${poolId}?force=true`);
   }
 });

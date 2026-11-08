@@ -125,3 +125,23 @@ func TestTheWorkingSetFieldsMoveNoSchedulingFigure(t *testing.T) {
 		t.Fatalf("booker: %d/%d/%d with the fields, %d/%d/%d without", u1, r1, s1, u2, r2, s2)
 	}
 }
+
+// Review 3 of #20, finding 4, through the booking and history_raise this
+// history feeds: fifteen recent heavy untrusted runs beside five light
+// measured ones book and raise exactly as they did before the switch.
+func TestRecentUntrustedHeavyRunsStillBookAfterTheSwitch(t *testing.T) {
+	var runs []store.JobPeak
+	for range 15 {
+		runs = append(runs, store.JobPeak{Job: "build", MemoryMB: 8192, WorkingSetMB: -1})
+	}
+	for range 5 {
+		runs = append(runs, store.JobPeak{Job: "build", MemoryMB: 512, WorkingSetMB: 512, WorkingSetFinal: true, WorkflowPath: ".github/workflows/ci.yml"})
+	}
+	before, _ := historyBooking(runs, 25)
+	beforeRaise, _ := raiseNeedMB(runs, 25)
+	after, _ := historyBooking(store.PreferWorkingSet(runs), 25)
+	afterRaise, _ := raiseNeedMB(store.PreferWorkingSet(runs), 25)
+	if after < before || afterRaise < beforeRaise {
+		t.Fatalf("booking %d -> %d MiB, history_raise %d -> %d MiB: the untrusted heavy runs were dropped", before, after, beforeRaise, afterRaise)
+	}
+}

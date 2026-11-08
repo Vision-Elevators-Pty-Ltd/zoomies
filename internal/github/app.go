@@ -1021,6 +1021,7 @@ func (c *appClient) GetWorkflowRun(ctx context.Context, repo string, runID int64
 		Conclusion: run.GetConclusion(),
 		RunNumber:  int64(run.GetRunNumber()),
 		Event:      run.GetEvent(),
+		Path:       run.GetPath(),
 	}, nil
 }
 

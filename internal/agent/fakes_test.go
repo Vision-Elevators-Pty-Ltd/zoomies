@@ -306,6 +306,8 @@ type fakeTransport struct {
 	beatResp  *HeartbeatResponse
 	beatErr   error
 	reportErr error
+	// resultErr is what ReportResult answers, after taking the result.
+	resultErr error
 	pollErr   error
 	streams   map[string]*fakeStream
 	openErr   error
@@ -381,7 +383,9 @@ func (f *fakeTransport) ReportResult(_ context.Context, res TaskResult) error {
 	case f.results <- res:
 	default:
 	}
-	return nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.resultErr
 }
 
 func (f *fakeTransport) ReportRunners(_ context.Context, reports []RunnerReport) error {

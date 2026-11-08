@@ -1428,6 +1428,9 @@ func (c *Controller) ReportResult(ctx context.Context, hostID string, res agent.
 	if r.HostID != hostID {
 		return fmt.Errorf("host %s reported on runner %s, which belongs to host %s", hostID, r.ID, r.HostID)
 	}
+	// The final working set of a runner a remove task took off the host:
+	// no runner report carries it any more.
+	c.recordWorkingSet(ctx, r, res.WorkingSet)
 
 	c.recordRunnerCreationResult(ctx, hostID, r, res)
 
@@ -1648,6 +1651,10 @@ func (c *Controller) applyReports(ctx context.Context, hostID string, reports []
 				"host", hostID, "runner", r.ID, "owner", r.HostID)
 			continue
 		}
+		// Before anything about the runner's lifecycle, which may stop here:
+		// a live report of a runner this side has finished with still carries
+		// what its job's readings saw, and a verdict that they missed some.
+		c.recordWorkingSet(ctx, r, rep.WorkingSet)
 		if rep.CleanupError != "" && r.State.Terminal() {
 			if err := c.noteCleanupFailure(ctx, r, agent.TaskRemoveRunner, rep.CleanupError); err != nil {
 				errs = append(errs, err)
@@ -1671,7 +1678,6 @@ func (c *Controller) applyReports(ctx context.Context, hostID string, reports []
 			}
 		}
 		resourcesMoved := false
-		c.recordWorkingSet(ctx, r, rep.WorkingSet)
 		if rep.Stats.SampledAt != nil || rep.Stats.CPUPercent != 0 || rep.Stats.MemoryBytes != 0 {
 			sample, _ := json.Marshal(rep.Stats)
 			// Read against the sample it is about to replace, which is why it is
@@ -2402,14 +2408,16 @@ func (c *Controller) EmbeddedAgent() *agent.Agent {
 // The job's working set is marked untrusted, and its old figure kept, where
 // the agent says its readings did not cover the run, and for a runner that is
 // not ephemeral, whose kept peak may be an earlier job's. A report with no
-// working set (an older agent, or nothing read yet) records nothing.
+// working set (an older agent, or nothing read yet) records nothing. A final
+// verdict (the agent has judged the runner's end) is what makes the job's
+// working set count as a measurement at all (store.RecordJobWorkingSet).
 func (c *Controller) recordWorkingSet(ctx context.Context, r *store.Runner, ws *agent.WorkingSetReport) {
 	if ws == nil {
 		return
 	}
 	mb := ws.PeakBytes >> 20
 	trusted := mb > 0 && !ws.Incomplete && r.Ephemeral
-	if err := c.st.RecordJobWorkingSet(ctx, r.ID, mb, trusted, c.Now()); err != nil {
+	if err := c.st.RecordJobWorkingSet(ctx, r.ID, mb, trusted, ws.Final, c.Now()); err != nil {
 		c.log.Debug("could not record a job's working set", "runner", r.ID, "error", err)
 	}
 }

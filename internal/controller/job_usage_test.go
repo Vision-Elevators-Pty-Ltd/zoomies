@@ -224,16 +224,19 @@ func TestTheWorkingSetHistorySettingGatesWhatSchedulingReads(t *testing.T) {
 		n++
 		r := h.seedRunner(t, pool, host, store.RunnerBusy)
 		started := h.c.Now().Add(-time.Duration(100-n) * time.Minute)
-		if _, err := h.st.UpsertJob(h.ctx, &store.Job{GitHubJobID: int64(7000 + n), Repo: "eyupio/zoomies", Workflow: "CI",
+		if _, err := h.st.UpsertJob(h.ctx, &store.Job{GitHubJobID: int64(7000 + n), GitHubRunID: int64(9000 + n), Repo: "eyupio/zoomies", Workflow: "CI",
 			JobName: "build", Labels: pool.Labels, State: store.JobInProgress, PoolID: pool.ID, Matched: true,
 			RunnerID: r.ID, QueuedAt: started, StartedAt: &started, HostID: host.ID}); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.st.SetWorkflowRunPath(h.ctx, "eyupio/zoomies", int64(9000+n), ".github/workflows/ci.yml"); err != nil {
 			t.Fatal(err)
 		}
 		if err := h.st.RecordJobUsage(h.ctx, r.ID, 1, mb); err != nil {
 			t.Fatal(err)
 		}
 		if ws > 0 {
-			if err := h.st.RecordJobWorkingSet(h.ctx, r.ID, ws, true, h.c.Now()); err != nil {
+			if err := h.st.RecordJobWorkingSet(h.ctx, r.ID, ws, true, true, h.c.Now()); err != nil {
 				t.Fatal(err)
 			}
 		}

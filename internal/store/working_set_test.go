@@ -13,7 +13,7 @@ import (
 // with. Untrusted runs (below zero) never count.
 func TestPreferWorkingSetSwitchesOnlyOnceEnoughTrustedRunsHaveIt(t *testing.T) {
 	old := func(mb int64) JobPeak { return JobPeak{MemoryMB: mb} }
-	ws := func(mb, w int64) JobPeak { return JobPeak{MemoryMB: mb, WorkingSetMB: w} }
+	ws := func(mb, w int64) JobPeak { return measured(JobPeak{MemoryMB: mb, WorkingSetMB: w}) }
 	killed := JobPeak{MemoryMB: 15000, OOMKilled: true, GrantedMemoryMB: 16384}
 
 	few := []JobPeak{ws(9000, 6000), ws(9000, 6000), ws(9000, 6000), ws(9000, 6000), old(12000), old(12000)}
@@ -56,7 +56,7 @@ func TestPreferWorkingSetSwitchesOnlyOnceEnoughTrustedRunsHaveIt(t *testing.T) {
 func TestPreferWorkingSetDecidesEachJobOfAPoolOnItsOwn(t *testing.T) {
 	var pool []JobPeak
 	for range 5 {
-		pool = append(pool, JobPeak{Job: "light", MemoryMB: 1500, WorkingSetMB: 1024})
+		pool = append(pool, measured(JobPeak{Job: "light", MemoryMB: 1500, WorkingSetMB: 1024}))
 	}
 	for range 20 {
 		pool = append(pool, JobPeak{Job: "heavy", MemoryMB: 8192})
@@ -93,7 +93,7 @@ func TestRecordJobWorkingSetFindsTheRunnersJobAndKeepsUntrustedForGood(t *testin
 	now := versionsEpoch.Add(48 * time.Hour)
 	running := usageJob(t, s, 1, "build", "pool_a", "run_1", JobInProgress, now.Add(-time.Hour))
 	for _, w := range []int64{6000, 3000} {
-		if err := s.RecordJobWorkingSet(ctx, "run_1", w, true, now); err != nil {
+		if err := s.RecordJobWorkingSet(ctx, "run_1", w, true, false, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -115,31 +115,31 @@ func TestRecordJobWorkingSetFindsTheRunnersJobAndKeepsUntrustedForGood(t *testin
 		Repo: "eyupio/zoomies", Workflow: "CI", JobName: "build", StartedAt: &started, CompletedAt: &done}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordJobWorkingSet(ctx, "run_1", 8192, true, now); err != nil {
+	if err := s.RecordJobWorkingSet(ctx, "run_1", 8192, true, true, now); err != nil {
 		t.Fatal(err)
 	}
-	if got := peak(running.ID); got != 8192 {
-		t.Fatalf("after a late final report the peak = %d, want 8192", got)
+	if got := peak(running.ID); got != 8192 || !sealed(t, s, running.ID) {
+		t.Fatalf("after a late final report the peak = %d (sealed %v), want 8192 sealed", got, sealed(t, s, running.ID))
 	}
 	// Past WorkingSetLateReport it does not.
-	if err := s.RecordJobWorkingSet(ctx, "run_1", 9999, true, now.Add(WorkingSetLateReport)); err != nil {
+	if err := s.RecordJobWorkingSet(ctx, "run_1", 9999, true, true, now.Add(WorkingSetLateReport)); err != nil {
 		t.Fatal(err)
 	}
 	if got := peak(running.ID); got != 8192 {
 		t.Fatalf("a report past the late window changed the peak to %d", got)
 	}
 	// Untrusted, for good: a later trusted report does not undo it.
-	if err := s.RecordJobWorkingSet(ctx, "run_1", 0, false, now); err != nil {
+	if err := s.RecordJobWorkingSet(ctx, "run_1", 0, false, false, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RecordJobWorkingSet(ctx, "run_1", 9000, true, now); err != nil {
+	if err := s.RecordJobWorkingSet(ctx, "run_1", 9000, true, true, now); err != nil {
 		t.Fatal(err)
 	}
 	if got := peak(running.ID); got != -1 {
 		t.Fatalf("an untrusted job's peak = %d, want -1 for good", got)
 	}
 	// A runner with no job in reach records nothing and fails nothing.
-	if err := s.RecordJobWorkingSet(ctx, "run_none", 5000, true, now); err != nil {
+	if err := s.RecordJobWorkingSet(ctx, "run_none", 5000, true, true, now); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -159,9 +159,10 @@ func TestTheHistoriesKeepUsagePeaksAndTheSwitchReadsThemJobByJob(t *testing.T) {
 			t.Fatal(err)
 		}
 		if wsMB > 0 || !trusted {
-			if err := s.RecordJobWorkingSet(ctx, runner, wsMB, trusted, at); err != nil {
+			if err := s.RecordJobWorkingSet(ctx, runner, wsMB, trusted, true, at); err != nil {
 				t.Fatal(err)
 			}
+			identify(t, s, runner, ".github/workflows/ci.yml")
 		}
 		done := at.Add(time.Hour)
 		if _, _, err := s.ApplyJob(ctx, &Job{GitHubJobID: int64(5000 + n), State: JobCompleted, Conclusion: "success",
@@ -202,4 +203,35 @@ func TestTheHistoriesKeepUsagePeaksAndTheSwitchReadsThemJobByJob(t *testing.T) {
 	if h != 16 || l != 5 {
 		t.Fatalf("switched pool history: %d heavy and %d light runs, want 16 and 5", h, l)
 	}
+}
+
+// measured is a run that counts as measured the new way (WorkingSetMeasured):
+// its trusted peak final, its workflow file known, its name its own.
+func measured(p JobPeak) JobPeak {
+	p.WorkingSetFinal, p.WorkflowPath = true, ".github/workflows/ci.yml"
+	return p
+}
+
+// identify gives a runner's job a run of its own, of the workflow file path,
+// as the run lookup would.
+func identify(t *testing.T, s *Store, runner, path string) {
+	t.Helper()
+	ctx := context.Background()
+	var runID int64
+	if err := s.write.QueryRowContext(ctx, `UPDATE jobs SET github_run_id = github_job_id + 900000 WHERE runner_id = ? RETURNING github_run_id`, runner).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetWorkflowRunPath(ctx, "eyupio/zoomies", runID, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sealed is whether a job's working set carries the agent's final verdict.
+func sealed(t *testing.T, s *Store, jobID string) bool {
+	t.Helper()
+	var v int
+	if err := s.read.QueryRowContext(context.Background(), `SELECT working_set_final FROM jobs WHERE id = ?`, jobID).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	return v == 1
 }

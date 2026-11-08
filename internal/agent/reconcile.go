@@ -626,10 +626,7 @@ func (a *Agent) markRunning(runnerID string, w backend.Workload, stats backend.S
 		// Coverage counts from the container's own start, so a runner this
 		// agent adopted after a restart, whose earlier readings are gone,
 		// is not taken for one it watched throughout.
-		r.runningSince = w.Status.StartedAt
-		if r.runningSince.IsZero() || r.runningSince.After(now) {
-			r.runningSince = now
-		}
+		r.startWorkingSet(w.Status.StartedAt, now)
 	}
 	// The stats loop owns r.stats; this observation may carry an older copy.
 	r.observedAt = now

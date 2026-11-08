@@ -749,6 +749,12 @@ func (c *Controller) join(ctx context.Context, req agent.JoinRequest, ip string,
 		c.withdrawHostUpdates(existing.ID)
 		h.Embedded = existing.Embedded || embedded
 		h.Cordoned = existing.Cordoned
+		// A reservation for device pools is the controller's record of what
+		// the machine's daemon can open, and a re-join (an agent rolled back,
+		// or restarted without agent.devices_only) changes nothing about that
+		// daemon: the host stays reserved, as it does across heartbeats
+		// (store.KeepReservation). Only retiring the host lifts it.
+		h.Features = store.KeepReservation(existing.Features, req.Features)
 		// The reserve is the operator's, and a re-join is something the agent
 		// does: a rebuilt machine reclaiming its row, or an embedded agent
 		// whose credentials no longer match. Letting it drop here would be the

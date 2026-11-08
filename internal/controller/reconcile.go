@@ -810,11 +810,15 @@ func (c *Controller) mintCredentials(ctx context.Context, inst *store.Installati
 			return backend.Credentials{}, 0, errRegistrationHeld
 		}
 		if pool.MapsDevices() {
-			resolved, _ := c.clients.runnerGroup(inst, pool.RunnerGroup)
-			if group == 0 {
-				resolved = github.RunnerGroup{}
+			// The group's policy as GitHub has it now, for the very group the
+			// runner is about to be registered in: a cached read would let a
+			// group whose workflow restriction was lifted since keep taking
+			// device runners, which GitHub would then offer ordinary jobs.
+			current, gerr := c.clients.currentRunnerGroup(ctx, inst, client, group)
+			if gerr != nil {
+				return backend.Credentials{}, 0, fmt.Errorf("%w: GitHub would not say what runner group %s allows now: %w", errDeviceGroup, pool.RunnerGroup, gerr)
 			}
-			if why := deviceGroupRefusal(inst, pool, resolved, unresolved); why != "" {
+			if why := deviceGroupRefusal(inst, pool, current, unresolved); why != "" {
 				return backend.Credentials{}, 0, fmt.Errorf("%w: %s", errDeviceGroup, why)
 			}
 		}

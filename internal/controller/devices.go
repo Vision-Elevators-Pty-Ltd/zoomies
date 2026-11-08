@@ -98,7 +98,9 @@ var errDeviceGroup = errors.New("a pool that maps devices must register in an or
 // ephemeral runner carries self-hosted, linux and x64: so the runner must
 // belong to an organisation runner group GitHub restricts to selected
 // workflows (the emulator ones), with no public repositories, and never the
-// Default group. Checked before a credential is minted, every time.
+// Default group. Checked before a credential is minted, every time, against
+// the group as GitHub reports it at that moment (currentRunnerGroup), never a
+// cached copy.
 func deviceGroupRefusal(inst *store.Installation, pool *store.Pool, group github.RunnerGroup, unresolved string) string {
 	switch {
 	case inst.TargetType != store.TargetOrg:

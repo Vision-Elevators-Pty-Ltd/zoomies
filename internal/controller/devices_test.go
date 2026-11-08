@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -386,5 +387,122 @@ func TestADeviceRunnerRegistersOnlyInAWorkflowRestrictedGroup(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Review r3 of #23, finding 1, the review's probe made permanent: a reserved
+// agent that joins again with its own credentials (rolled back, or restarted
+// with devices_only only in an environment an older release ignores) keeps
+// its host reserved. The row keeps its ID, takes no general create, and,
+// reporting no devices feature, no device pool either. An ordinary host's
+// rejoin records what it reports, as before.
+func TestAReservationSurvivesARejoin(t *testing.T) {
+	h := newHarness(t)
+	inst := h.installation()
+	general := h.pool(inst, "general")
+	general.MinRunners = 1
+	if err := h.st.UpdatePool(h.ctx, general); err != nil {
+		t.Fatal(err)
+	}
+	emu := h.pool(inst, "emulator")
+	emu.MinRunners = 1
+	emu.HostSelector = store.StringMap{"kvm": "ok"}
+	emu.RunnerSettings.Devices = []string{"/dev/kvm"}
+	emu.RunnerGroup = h.emulatorGroup()
+	if err := h.st.UpdatePool(h.ctx, emu); err != nil {
+		t.Fatal(err)
+	}
+	req := joinRequest("runner-emu", h.joinToken(t, map[string]string{"kvm": "ok"}, 4))
+	req.CPUs, req.MemoryMB, req.DiskTotalMB, req.DiskFreeMB = 8, 32768, 500*1024, 400*1024
+	req.Backends[0].Limits = enforcesEverything
+	req.Features = []string{agent.FeatureDevices, agent.FeatureDevicesOnly}
+	first, err := h.c.Join(h.ctx, req, "10.0.0.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.JoinToken = h.joinToken(t, map[string]string{"kvm": "ok"}, 4)
+	req.PreviousToken, req.PreviousHostID = first.AgentToken, first.HostID
+	req.Features = nil
+	second, err := h.c.Join(h.ctx, req, "10.0.0.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.HostID != first.HostID {
+		t.Fatalf("the rejoin made a new host %s, not %s", second.HostID, first.HostID)
+	}
+	host, err := h.st.GetHost(h.ctx, second.HostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !host.Supports(store.FeatureDevicesOnly) || host.Supports(store.FeatureDevices) {
+		t.Fatalf("after the rejoin the host has %v, want reserved and not mapping devices", host.Features)
+	}
+	if err := h.c.Reconcile(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	h.c.lifecycleCalls.Wait()
+	if h.hasTaskOfKind(second.HostID, agent.TaskCreateRunner) {
+		t.Fatalf("a runner was placed on the rejoined reserved host: %v", kindsOf(h.tasksFor(second.HostID)))
+	}
+
+	// An ordinary host's rejoin is unchanged: what it reports is recorded.
+	plainReq := joinRequest("runner-pr", h.joinToken(t, nil, 4))
+	plainReq.Features = []string{agent.FeatureDaemonShare}
+	p1, err := h.c.Join(h.ctx, plainReq, "10.0.0.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainReq.JoinToken = h.joinToken(t, nil, 4)
+	plainReq.PreviousToken, plainReq.PreviousHostID = p1.AgentToken, p1.HostID
+	plainReq.Features = []string{agent.FeatureElasticCPU}
+	p2, err := h.c.Join(h.ctx, plainReq, "10.0.0.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, _ := h.st.GetHost(h.ctx, p2.HostID)
+	if !slices.Equal([]string(plain.Features), []string{agent.FeatureElasticCPU}) {
+		t.Fatalf("an ordinary rejoin recorded %v", plain.Features)
+	}
+}
+
+// Review r3 of #23, finding 2, the review's probe made permanent: with the
+// group policy cached by an earlier registration, a group whose workflow
+// restriction is lifted (or that is opened to public repositories) on GitHub
+// takes no further device runner: the policy is read from GitHub for every
+// device registration, not from the cache, and a refresh of group problems
+// does not change that.
+func TestADeviceRegistrationReadsTheGroupPolicyEveryTime(t *testing.T) {
+	h := newHarness(t)
+	inst := h.installation()
+	p := h.pool(inst, "emulator")
+	p.Ephemeral = true
+	p.RunnerGroup = h.emulatorGroup()
+	p.RunnerSettings.Devices = []string{"/dev/kvm"}
+	mint := func(name string) error {
+		_, _, err := h.c.mintCredentials(h.ctx, inst, p, name)
+		return err
+	}
+	if err := mint("first"); err != nil {
+		t.Fatalf("the restricted group refused: %v", err)
+	}
+	h.gh.SetRunnerGroupRestrictedToWorkflows("emulator", false)
+	if err := mint("after-restriction-lifted"); err == nil {
+		t.Fatal("a device runner was registered after the group's workflow restriction was lifted")
+	}
+	client, err := h.c.clients.get(h.ctx, inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.c.refreshRunnerGroupProblems(h.ctx, inst, client)
+	if err := mint("after-refresh"); err == nil {
+		t.Fatal("a device runner was registered after a group refresh, the restriction still lifted")
+	}
+	h.gh.SetRunnerGroupRestrictedToWorkflows("emulator", true)
+	if err := mint("restored"); err != nil {
+		t.Fatalf("the restored restriction refused: %v", err)
+	}
+	h.gh.SetRunnerGroupPublicAccess("emulator", true)
+	if err := mint("opened-to-public"); err == nil {
+		t.Fatal("a device runner was registered after the group was opened to public repositories")
 	}
 }

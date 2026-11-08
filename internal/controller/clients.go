@@ -230,21 +230,28 @@ func (cc *clientCache) runnerGroupID(ctx context.Context, inst *store.Installati
 	return found.ID, "", found.PublicRepositoryAccessKnown && !found.AllowsPublicRepositories
 }
 
-// runnerGroup is the group runnerGroupID last resolved name to for inst, from
-// the cache it fills, and whether there was one.
-func (cc *clientCache) runnerGroup(inst *store.Installation, name string) (github.RunnerGroup, bool) {
-	lookup := strings.ToLower(strings.TrimSpace(name))
-	if lookup == "" {
-		lookup = "default"
+// currentRunnerGroup asks GitHub, now and past the cache, for the runner group
+// with id, for a registration that must not rest on a policy read earlier: a
+// pool that maps devices (deviceGroupRefusal). The zero group where id is 0
+// or GitHub lists none with it; an error, which the caller refuses on, where
+// GitHub did not answer.
+func (cc *clientCache) currentRunnerGroup(ctx context.Context, inst *store.Installation, client github.Client, id int64) (github.RunnerGroup, error) {
+	if id == 0 || inst.TargetType != store.TargetOrg {
+		return github.RunnerGroup{}, nil
 	}
-	cc.mu.Lock()
-	defer cc.mu.Unlock()
-	e := cc.entries[inst.ID]
-	if e == nil || e.groups == nil {
-		return github.RunnerGroup{}, false
+	groups, err := client.ListRunnerGroups(ctx)
+	if errors.Is(err, github.ErrRateLimited) {
+		cc.c.holdRateLimited(inst.ID, err, cc.c.Now(), "checking a device pool's runner group")
 	}
-	g, ok := e.groups[lookup]
-	return g, ok
+	if err != nil {
+		return github.RunnerGroup{}, err
+	}
+	for _, g := range groups {
+		if g.ID == id {
+			return g, nil
+		}
+	}
+	return github.RunnerGroup{}, nil
 }
 
 // probeLoop re-checks every installation's credentials on an interval, so a

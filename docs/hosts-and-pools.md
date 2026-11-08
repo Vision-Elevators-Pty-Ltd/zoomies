@@ -802,10 +802,12 @@ Each of these is enforced, and refused where it is not met:
   labels satisfy, and every ephemeral runner carries `self-hosted, linux, x64`.
   So the pool's runner group must be restricted on GitHub to selected
   workflows (the emulator workflows only) and must not serve public
-  repositories. The controller checks the group before it registers each
-  runner, and fails the runner, saying why, where it is not. Keep the
-  emulator jobs in workflows of their own: every job of a selected workflow
-  can be offered the group's runners.
+  repositories. The controller asks GitHub for the group's policy afresh
+  before it registers each runner, never trusting an earlier answer, and
+  fails the runner, saying why, where it is not. Runners already registered
+  stay in the group, so before relaxing its restriction, disable the pool and
+  let its runners drain. Keep the emulator jobs in workflows of their own:
+  every job of a selected workflow can be offered the group's runners.
 - **The agents.** A device pool is placed only on a host whose agent is
   reserved for device pools (`agent.devices_only: true` in its YAML), and
   maps devices (the `devices` feature), and is labelled `kvm=ok`. An ordinary
@@ -814,7 +816,8 @@ Each of these is enforced, and refused where it is not met:
   A host stays reserved once its agent has said so: an agent later rolled back
   to a release that does not say so (or started with the setting only in its
   environment, which an older release ignores) leaves the host reserved and
-  without the `devices` feature, so it takes no pool at all. Only retiring the
+  without the `devices` feature, so it takes no pool at all, whether it
+  reconnects or joins again with its own credentials. Only retiring the
   host lifts the reservation. Set `devices_only` in the YAML, not the
   environment: an older release refuses to start on the unknown key, which is
   the safe failure.

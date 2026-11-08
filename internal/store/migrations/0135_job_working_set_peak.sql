@@ -7,6 +7,11 @@
 -- twice.
 --
 -- Zero is "not measured this way": every job before this migration, and a job on
--- an older agent. The job history prefers this figure once a job has enough
--- runs measured with it, and keeps the old one until then.
+-- an older agent. -1 is "measured, but not to be trusted": the agent's readings
+-- had a gap or failed, or the runner was not ephemeral. The job history prefers
+-- this figure, job by job, once a job has five trusted runs, and keeps the old
+-- one until then.
+--
+-- Rolling back to an older build needs deploy/rollback/0135_job_working_set_peak.down.sql
+-- first: an older build refuses a ledger naming a migration it does not have.
 ALTER TABLE jobs ADD COLUMN peak_working_set_mb INTEGER NOT NULL DEFAULT 0;

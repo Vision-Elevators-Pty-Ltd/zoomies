@@ -113,11 +113,17 @@ type Stats struct {
 	// beside 66 MB of its own memory. Zero where the engine did not say (an
 	// older engine, cgroup v1, the process backend): unknown, not empty.
 	WorkingSetBytes int64 `json:"working_set_bytes,omitempty"`
-	// WorkingSetPeakBytes is the most WorkingSetBytes reached in the agent's
-	// faster memory samples over the minute before this sample (and this
-	// sample's own), so a spike between two of these samples is still seen.
-	// Zero from an agent that predates it.
+	// WorkingSetPeakBytes is the most working set any of the agent's readings
+	// of this runner saw, its 10-second ones and its full samples, over the
+	// runner's whole life (an ephemeral runner's life is its job), so a spike
+	// between two full samples, or just before the job ended, is still
+	// reported. Zero from an agent that predates it.
 	WorkingSetPeakBytes int64 `json:"working_set_peak_bytes,omitempty"`
+	// WorkingSetIncomplete says the readings behind WorkingSetPeakBytes may
+	// have missed part of the runner's life: a gap of more than 45 seconds
+	// while it ran, or a reading that failed or came back unknown. The
+	// controller does not count such a run as measured the new way.
+	WorkingSetIncomplete bool `json:"working_set_incomplete,omitempty"`
 	// Containers is the containers the sample added up, the runner first and
 	// then a docker-in-docker pair's sidecar: what the agent's faster memory
 	// samples read between two of these. In the agent only, never sent.

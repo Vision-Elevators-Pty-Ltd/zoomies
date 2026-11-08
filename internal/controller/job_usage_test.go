@@ -113,43 +113,89 @@ func TestAJobKilledForMemoryIsRecordedExplainedAndReported(t *testing.T) {
 	}
 }
 
-// A report's working set is recorded on the job beside its usage peak: the
-// most of the sample's own and the peak the agent's faster samples saw, and a
-// later, smaller report lowers nothing. An agent that sends neither records
-// nothing, which the history reads as "measured the old way".
-func TestAReportsWorkingSetPeakIsRecordedOnTheRunningJob(t *testing.T) {
-	h := newHarness(t)
-	_, pool, host := h.fleet()
-	r := h.seedRunner(t, pool, host, store.RunnerBusy)
-	started := h.c.Now().Add(-time.Hour)
-	if _, err := h.st.UpsertJob(h.ctx, &store.Job{
-		GitHubJobID: 4343, Repo: "eyupio/zoomies", Workflow: "CI", JobName: "build",
-		Labels: pool.Labels, State: store.JobInProgress, PoolID: pool.ID, Matched: true,
-		RunnerID: r.ID, RunnerName: r.Name, QueuedAt: started, StartedAt: &started, HostID: host.ID,
-	}); err != nil {
-		t.Fatalf("UpsertJob: %v", err)
-	}
-	at := h.c.Now()
-	for _, s := range []backend.Stats{
-		{SampledAt: &at, CPUPercent: 100, MemoryBytes: 9000 << 20, WorkingSetBytes: 5000 << 20, WorkingSetPeakBytes: 6500 << 20},
-		{SampledAt: &at, CPUPercent: 100, MemoryBytes: 3000 << 20, WorkingSetBytes: 2000 << 20},
-		{SampledAt: &at, CPUPercent: 100, MemoryBytes: 1000 << 20},
-	} {
-		if err := h.c.ReportRunners(h.ctx, host.ID, []agent.RunnerReport{{RunnerID: r.ID, Stats: s}}); err != nil {
+// A report's working set is recorded on the runner's job beside its usage
+// peak: the most any of the agent's readings saw, never lowered. The final
+// report of an ended runner, which can come after GitHub closed the job, still
+// reaches it. A report whose readings had a gap, and a runner that is not
+// ephemeral, mark the job's working set untrusted, so the history keeps its
+// old figure.
+func TestAReportsWorkingSetPeakIsRecordedOnTheRunnersJob(t *testing.T) {
+	run := func(t *testing.T, ephemeral bool, reports []backend.Stats, final backend.Stats) store.JobPeak {
+		t.Helper()
+		h := newHarness(t)
+		_, pool, host := h.fleet()
+		r := &store.Runner{PoolID: pool.ID, HostID: host.ID, Name: "zoomies-ws-" + store.NewSecret(4),
+			State: store.RunnerProvisioning, Ephemeral: ephemeral, Labels: pool.Labels}
+		if err := h.st.CreateRunner(h.ctx, r); err != nil {
+			t.Fatalf("CreateRunner: %v", err)
+		}
+		for _, to := range []store.RunnerState{store.RunnerRegistering, store.RunnerIdle, store.RunnerBusy} {
+			out, err := h.st.TransitionRunner(h.ctx, r.ID, to, "")
+			if err != nil {
+				t.Fatalf("TransitionRunner(%s): %v", to, err)
+			}
+			r = out
+		}
+		started := h.c.Now().Add(-time.Hour)
+		if _, err := h.st.UpsertJob(h.ctx, &store.Job{
+			GitHubJobID: 4343, Repo: "eyupio/zoomies", Workflow: "CI", JobName: "build",
+			Labels: pool.Labels, State: store.JobInProgress, PoolID: pool.ID, Matched: true,
+			RunnerID: r.ID, RunnerName: r.Name, QueuedAt: started, StartedAt: &started, HostID: host.ID,
+		}); err != nil {
+			t.Fatalf("UpsertJob: %v", err)
+		}
+		for _, s := range reports {
+			if err := h.c.ReportRunners(h.ctx, host.ID, []agent.RunnerReport{{RunnerID: r.ID, Stats: s}}); err != nil {
+				t.Fatalf("ReportRunners: %v", err)
+			}
+		}
+		done := h.c.Now()
+		if _, err := h.st.UpsertJob(h.ctx, &store.Job{GitHubJobID: 4343, State: store.JobCompleted, Conclusion: "success",
+			Repo: "eyupio/zoomies", StartedAt: &started, CompletedAt: &done}); err != nil {
+			t.Fatalf("completing the job: %v", err)
+		}
+		// The runner's final report, after GitHub closed the job.
+		if err := h.c.ReportRunners(h.ctx, host.ID, []agent.RunnerReport{{RunnerID: r.ID, State: store.RunnerRemoved,
+			Phase: backend.PhaseExited, Stats: final}}); err != nil {
 			t.Fatalf("ReportRunners: %v", err)
 		}
+		key := store.JobUsageKey{Repo: "eyupio/zoomies", Workflow: "CI", JobName: "build", PoolID: pool.ID}
+		got, err := h.st.JobUsageHistory(h.ctx, []store.JobUsageKey{key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got[key]) != 1 {
+			t.Fatalf("history = %+v, want one run", got[key])
+		}
+		return got[key][0]
 	}
-	done := h.c.Now()
-	if _, err := h.st.UpsertJob(h.ctx, &store.Job{GitHubJobID: 4343, State: store.JobCompleted, Conclusion: "success",
-		Repo: "eyupio/zoomies", StartedAt: &started, CompletedAt: &done}); err != nil {
-		t.Fatalf("completing the job: %v", err)
+	at := time.Now()
+	reports := []backend.Stats{
+		{SampledAt: &at, CPUPercent: 100, MemoryBytes: 9000 << 20, WorkingSetBytes: 5000 << 20, WorkingSetPeakBytes: 6500 << 20},
+		{SampledAt: &at, CPUPercent: 100, MemoryBytes: 3000 << 20, WorkingSetBytes: 2000 << 20, WorkingSetPeakBytes: 6500 << 20},
 	}
-	key := store.JobUsageKey{Repo: "eyupio/zoomies", Workflow: "CI", JobName: "build", PoolID: pool.ID}
-	got, err := h.st.JobUsageHistory(h.ctx, []store.JobUsageKey{key})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runs := got[key]; len(runs) != 1 || runs[0].MemoryMB != 9000 || runs[0].WorkingSetMB != 6500 {
-		t.Fatalf("history = %+v, want one run at 9000 MB with a 6500 MB working set", runs)
-	}
+	final := backend.Stats{MemoryBytes: 1000 << 20, WorkingSetBytes: 900 << 20, WorkingSetPeakBytes: 7200 << 20}
+	t.Run("trusted, with the peak the job ended on", func(t *testing.T) {
+		if p := run(t, true, reports, final); p.MemoryMB != 9000 || p.WorkingSetMB != 7200 {
+			t.Fatalf("run = %+v, want 9000 MB with a 7200 MB working set from the final report", p)
+		}
+	})
+	t.Run("readings with a gap", func(t *testing.T) {
+		gap := final
+		gap.WorkingSetIncomplete = true
+		if p := run(t, true, reports, gap); p.WorkingSetMB != -1 {
+			t.Fatalf("run = %+v, want an untrusted working set", p)
+		}
+	})
+	t.Run("usage with no working set", func(t *testing.T) {
+		old := []backend.Stats{{SampledAt: &at, CPUPercent: 100, MemoryBytes: 9000 << 20}}
+		if p := run(t, true, old, backend.Stats{}); p.WorkingSetMB != -1 {
+			t.Fatalf("run = %+v, want an untrusted working set", p)
+		}
+	})
+	t.Run("not ephemeral", func(t *testing.T) {
+		if p := run(t, false, reports, final); p.WorkingSetMB != -1 {
+			t.Fatalf("run = %+v, want an untrusted working set", p)
+		}
+	})
 }

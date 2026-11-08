@@ -10,30 +10,32 @@ import (
 
 // A job's memory peak is what the controller books and raises runners by, and
 // a 30-second stats sample misses a spike that comes and goes between two of
-// them. The working set alone is read more often, for runners with work, with
-// the one-shot reading the memory valve uses (no CPU interval, so a call is
-// the daemon reading the cgroup once), and each stats sample carries the most
-// it reached over the minute before.
+// them. The working set alone is read more often, for every running runner,
+// with the one-shot reading the memory valve uses (no CPU interval, so a call
+// is the daemon reading the cgroup once).
+//
+// Every reading, fast or full, raises a peak kept for the runner's whole life
+// (workingSetPeak), and every report the runner sends carries it, so a peak
+// survives a job that ends before the next full sample, a full sample that
+// fails, and a report the controller did not get. The runner is ephemeral, so
+// its life is its job; the controller does not trust the peak of one that is
+// not.
+//
+// A peak is only a measurement of the job if the readings covered it: one is
+// marked incomplete (workingSetIncomplete) as soon as more than
+// workingSetMaxGap passes, while it runs, without a reading, counted from the
+// container's start, and when any reading of it fails or comes back unknown.
+// The controller keeps such a run's old figure.
 const (
 	workingSetInterval = 10 * time.Second
 	workingSetBudget   = 8 * time.Second
 	workingSetTimeout  = 3 * time.Second
 	workingSetWorkers  = 4
-	// workingSetWindow is how far back a stats sample looks: two stats
-	// intervals, so a heartbeat that missed one sample still carries the
-	// spike in the next. A peak is a maximum, so seeing it twice is harmless.
-	workingSetWindow = 2 * statsInterval
-	// workingSetFloor is the use below which a runner is not read between
-	// stats samples: an idle runner uses 40-100 MB, and reading only the ones
-	// above this keeps the extra calls to the runners with a job.
-	workingSetFloor = 256 << 20
+	// workingSetMaxGap is the longest a running runner may go without a
+	// reading and still count as covered: four fast rounds, one and a half
+	// full ones.
+	workingSetMaxGap = 45 * time.Second
 )
-
-// workingSetSample is one fast reading of a runner's working set.
-type workingSetSample struct {
-	at    time.Time
-	bytes int64
-}
 
 func (a *Agent) workingSetLoop(ctx context.Context) error {
 	ticker := time.NewTicker(workingSetInterval)
@@ -49,10 +51,9 @@ func (a *Agent) workingSetLoop(ctx context.Context) error {
 }
 
 // sampleWorkingSets reads the working set of every running runner whose last
-// stats sample named its containers and used at least workingSetFloor (in
-// practice, the ones with a job), adding up a pair's two, and keeps it
-// beside the runner. A runner any of whose containers could not be read is
-// left out of this round: half a pair would read as the runner using less.
+// stats sample named its containers, adding up a pair's two. A runner any of
+// whose containers could not be read, or read as unknown, is marked
+// incomplete: half a pair would read as the runner using less.
 func (a *Agent) sampleWorkingSets(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, workingSetBudget)
 	defer cancel()
@@ -65,8 +66,7 @@ func (a *Agent) sampleWorkingSets(ctx context.Context) {
 	var jobs []job
 	a.mu.Lock()
 	for id, r := range a.runners {
-		if r.terminal || r.hostRemoved || r.handle == "" || r.phase != backend.PhaseRunning ||
-			len(r.stats.Containers) == 0 || r.stats.MemoryBytes < workingSetFloor {
+		if r.terminal || r.hostRemoved || r.handle == "" || r.phase != backend.PhaseRunning || len(r.stats.Containers) == 0 {
 			continue
 		}
 		b, err := a.opts.Backends.Get(r.kind)
@@ -103,9 +103,7 @@ func (a *Agent) sampleWorkingSets(ctx context.Context) {
 					}
 					total += reading.WorkingSetBytes
 				}
-				if total > 0 {
-					a.noteWorkingSet(j.runnerID, j.handle, total, a.now())
-				}
+				a.noteWorkingSet(j.runnerID, j.handle, total, a.now())
 			}
 		}()
 	}
@@ -119,8 +117,9 @@ func (a *Agent) sampleWorkingSets(ctx context.Context) {
 	wg.Wait()
 }
 
-// noteWorkingSet keeps one fast reading beside the runner it was taken of,
-// dropping readings older than workingSetWindow.
+// noteWorkingSet records one reading of a runner's working set, fast or full:
+// bytes of zero or less is a reading that failed or came back unknown, and
+// marks the runner incomplete.
 func (a *Agent) noteWorkingSet(runnerID string, handle backend.Handle, bytes int64, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -128,29 +127,41 @@ func (a *Agent) noteWorkingSet(runnerID string, handle backend.Handle, bytes int
 	if r == nil || r.handle != handle {
 		return
 	}
-	r.workingSets = append(pruneWorkingSets(r.workingSets, now), workingSetSample{at: now, bytes: bytes})
+	r.noteWorkingSet(bytes, now)
 }
 
-// pruneWorkingSets drops the readings older than workingSetWindow.
-func pruneWorkingSets(s []workingSetSample, now time.Time) []workingSetSample {
-	keep := s[:0]
-	for _, w := range s {
-		if now.Sub(w.at) <= workingSetWindow {
-			keep = append(keep, w)
-		}
+// noteWorkingSet is the reading on a tracked runner, under the agent's lock.
+func (t *tracked) noteWorkingSet(bytes int64, now time.Time) {
+	t.checkWorkingSetCoverage(now)
+	if bytes <= 0 {
+		t.workingSetIncomplete = true
+		return
 	}
-	return keep
+	t.workingSetPeak = max(t.workingSetPeak, bytes)
+	t.workingSetLastAt = now
 }
 
-// workingSetPeak is the most of a stats sample's own working set and the fast
-// readings within workingSetWindow of now: what the sample reports as
-// WorkingSetPeakBytes. Zero where nothing is known.
-func workingSetPeak(stats backend.Stats, fast []workingSetSample, now time.Time) int64 {
-	peak := stats.WorkingSetBytes
-	for _, w := range fast {
-		if now.Sub(w.at) <= workingSetWindow {
-			peak = max(peak, w.bytes)
-		}
+// checkWorkingSetCoverage marks the runner incomplete if it has been running
+// longer than workingSetMaxGap since its last reading, or since its container
+// started where there has been none.
+func (t *tracked) checkWorkingSetCoverage(now time.Time) {
+	since := t.workingSetLastAt
+	if since.IsZero() {
+		since = t.runningSince
 	}
-	return peak
+	if !since.IsZero() && now.Sub(since) > workingSetMaxGap {
+		t.workingSetIncomplete = true
+	}
+}
+
+// foldWorkingSet puts the runner's kept peak and its coverage into a report's
+// stats: every report carries the most any reading saw, whether or not the
+// last full sample succeeded. A runner still running is checked for a gap up
+// to now; one that has ended is judged by the readings it had.
+func (t *tracked) foldWorkingSet(stats *backend.Stats, now time.Time) {
+	if !t.terminal && t.phase == backend.PhaseRunning {
+		t.checkWorkingSetCoverage(now)
+	}
+	stats.WorkingSetPeakBytes = max(stats.WorkingSetPeakBytes, stats.WorkingSetBytes, t.workingSetPeak)
+	stats.WorkingSetIncomplete = t.workingSetIncomplete
 }

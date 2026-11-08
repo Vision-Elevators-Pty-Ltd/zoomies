@@ -1371,19 +1371,37 @@ func (s statsJSON) sample() StatsSample {
 // is enough for a container that read a file once, and not for a build,
 // which reads its sources and toolchain again and again and moves them to
 // the active list. The keys are the same for a rootful and a rootless engine
-// on cgroup v2. Zero, meaning unknown, where the engine reports neither file
-// list (cgroup v1 names them total_*, and an old engine nothing at all), and
-// never more than the usage.
+// on cgroup v2. Zero, meaning unknown, unless the map is positively cgroup
+// v2's (cgroupV2Stats), and never more than the usage.
 func WorkingSetOf(usage uint64, stats map[string]uint64) int64 {
-	active, okA := stats["active_file"]
-	inactive, okI := stats["inactive_file"]
-	if !okA || !okI || usage == 0 {
+	if usage == 0 || !cgroupV2Stats(stats) {
 		return 0
 	}
+	active, inactive := stats["active_file"], stats["inactive_file"]
 	drop := active + inactive + stats["slab_reclaimable"]
 	keep := stats["file_dirty"] + stats["file_writeback"]
 	ws := int64(usage) - int64(drop) + int64(keep)
 	return min(max(ws, 0), int64(usage))
+}
+
+// cgroupV2Stats reports whether a Docker memory.stat map is cgroup v2's. A v1
+// map has active_file and inactive_file too, with its dirty pages under
+// "dirty" and "writeback" and hierarchical totals under total_*, so the file
+// lists alone prove nothing: read as v2, a v1 map's dirty pages would never be
+// added back. v2 is recognised by keys v1 never has (anon, file, file_dirty,
+// file_writeback, slab_reclaimable) and the absence of every total_* key.
+func cgroupV2Stats(stats map[string]uint64) bool {
+	for _, k := range []string{"anon", "file", "active_file", "inactive_file", "file_dirty", "file_writeback", "slab_reclaimable"} {
+		if _, ok := stats[k]; !ok {
+			return false
+		}
+	}
+	for k := range stats {
+		if strings.HasPrefix(k, "total_") {
+			return false
+		}
+	}
+	return true
 }
 
 // splitImageRef separates an image reference into the name the API wants in

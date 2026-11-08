@@ -130,7 +130,7 @@ func (a *Agent) ReconcileOnce(ctx context.Context) ([]RunnerReport, error) {
 			// Delivery of a completed removal does not depend on the backend
 			// still answering, or on the startup grace for missing workloads.
 			if !seen[r.runnerID] {
-				reports = append(reports, r.report())
+				reports = append(reports, r.reportAt(now))
 			}
 			continue
 		}
@@ -146,7 +146,7 @@ func (a *Agent) ReconcileOnce(ctx context.Context) ([]RunnerReport, error) {
 			if r.reported {
 				a.untrack(r.runnerID)
 			} else {
-				reports = append(reports, r.report())
+				reports = append(reports, r.reportAt(now))
 			}
 			continue
 		}
@@ -160,6 +160,9 @@ func (a *Agent) ReconcileOnce(ctx context.Context) ([]RunnerReport, error) {
 			Phase:      backend.PhaseGone,
 			Message:    msg,
 			ObservedAt: now,
+			// The kept working-set peak goes with it: the job may have
+			// ended after the last report.
+			Stats: r.reportAt(now).Stats,
 		})
 	}
 
@@ -170,7 +173,7 @@ func (a *Agent) ReconcileOnce(ctx context.Context) ([]RunnerReport, error) {
 // that has stopped.
 func (a *Agent) observe(ctx context.Context, b backend.Backend, r tracked, w backend.Workload, now time.Time) (RunnerReport, bool) {
 	if r.hostRemoved {
-		return r.report(), true
+		return r.reportAt(now), true
 	}
 	switch w.Status.Phase {
 	case backend.PhaseExited, backend.PhaseExitUnknown, backend.PhaseFailed, backend.PhaseGone:
@@ -619,6 +622,15 @@ func (a *Agent) markRunning(runnerID string, w backend.Workload, stats backend.S
 	}
 	r.handle = w.Handle
 	r.phase = w.Status.Phase
+	if r.phase == backend.PhaseRunning && r.runningSince.IsZero() {
+		// Coverage counts from the container's own start, so a runner this
+		// agent adopted after a restart, whose earlier readings are gone,
+		// is not taken for one it watched throughout.
+		r.runningSince = w.Status.StartedAt
+		if r.runningSince.IsZero() || r.runningSince.After(now) {
+			r.runningSince = now
+		}
+	}
 	// The stats loop owns r.stats; this observation may carry an older copy.
 	r.observedAt = now
 	if r.name == "" {

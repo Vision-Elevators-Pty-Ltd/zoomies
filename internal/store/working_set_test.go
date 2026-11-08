@@ -7,10 +7,11 @@ import (
 	"time"
 )
 
-// The old figure stands until a job has WorkingSetMinRuns runs measured the
-// new way; from then on only those runs are read, at their working set, and a
-// run the kernel killed is kept whatever it was measured with.
-func TestPreferWorkingSetSwitchesOnlyOnceEnoughRunsHaveIt(t *testing.T) {
+// The old figure stands until a job has WorkingSetMinRuns trusted runs
+// measured the new way; from then on only those runs are read, at their
+// working set, and a run the kernel killed is kept whatever it was measured
+// with. Untrusted runs (below zero) never count.
+func TestPreferWorkingSetSwitchesOnlyOnceEnoughTrustedRunsHaveIt(t *testing.T) {
 	old := func(mb int64) JobPeak { return JobPeak{MemoryMB: mb} }
 	ws := func(mb, w int64) JobPeak { return JobPeak{MemoryMB: mb, WorkingSetMB: w} }
 	killed := JobPeak{MemoryMB: 15000, OOMKilled: true, GrantedMemoryMB: 16384}
@@ -33,30 +34,131 @@ func TestPreferWorkingSetSwitchesOnlyOnceEnoughRunsHaveIt(t *testing.T) {
 	if k := got[5]; !k.OOMKilled || k.MemoryMB != 15000 || k.GrantedMemoryMB != 16384 {
 		t.Fatalf("the killed run was changed or dropped: %+v", k)
 	}
-	// A killed run does not count towards the five: it says nothing about the
-	// new measurement.
 	four := []JobPeak{ws(1, 1), ws(1, 1), ws(1, 1), ws(1, 1), {MemoryMB: 2, WorkingSetMB: 2, OOMKilled: true}, old(5)}
 	if got := PreferWorkingSet(four); len(got) != len(four) || got[5].MemoryMB != 5 {
 		t.Fatalf("a killed run counted towards switching: %+v", got)
 	}
+	// Review of #20, blocker 2: runs whose readings had a gap are untrusted
+	// (-1) and never switch a job, however many.
+	var partial []JobPeak
+	for range 10 {
+		partial = append(partial, JobPeak{MemoryMB: 8192, WorkingSetMB: -1})
+	}
+	partial = append(partial, old(8192))
+	if got := PreferWorkingSet(partial); len(got) != len(partial) || got[0].MemoryMB != 8192 {
+		t.Fatalf("untrusted runs switched the history: %+v", got)
+	}
 }
 
-// The working set is recorded beside the usage peak, only on the job in
-// progress and never lowered, and both histories read it through
-// PreferWorkingSet.
+// Review of #20, blocker 1: in a pool's history, which mixes jobs, each job is
+// decided on its own. Five light runs re-measured switch the light job, and
+// leave every old run of the heavy job, which has none, at its old figure.
+func TestPreferWorkingSetDecidesEachJobOfAPoolOnItsOwn(t *testing.T) {
+	var pool []JobPeak
+	for range 5 {
+		pool = append(pool, JobPeak{Job: "light", MemoryMB: 1500, WorkingSetMB: 1024})
+	}
+	for range 20 {
+		pool = append(pool, JobPeak{Job: "heavy", MemoryMB: 8192})
+	}
+	got := PreferWorkingSet(pool)
+	if len(got) != 25 {
+		t.Fatalf("pool history = %d runs, want all 25", len(got))
+	}
+	heavy := 0
+	for _, p := range got {
+		switch p.Job {
+		case "light":
+			if p.MemoryMB != 1024 {
+				t.Fatalf("a light run was not read at its working set: %+v", p)
+			}
+		case "heavy":
+			heavy++
+			if p.MemoryMB != 8192 {
+				t.Fatalf("a heavy run was changed: %+v", p)
+			}
+		}
+	}
+	if heavy != 20 {
+		t.Fatalf("%d heavy runs kept, want 20", heavy)
+	}
+}
+
+// The working set goes on the job in progress, or on the one the runner has
+// just completed when its final report comes after GitHub closed the job, and
+// is never lowered. An untrusted report marks the job for good.
+func TestRecordJobWorkingSetFindsTheRunnersJobAndKeepsUntrustedForGood(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := versionsEpoch.Add(48 * time.Hour)
+	running := usageJob(t, s, 1, "build", "pool_a", "run_1", JobInProgress, now.Add(-time.Hour))
+	for _, w := range []int64{6000, 3000} {
+		if err := s.RecordJobWorkingSet(ctx, "run_1", w, true, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	peak := func(id string) int64 {
+		t.Helper()
+		var v int64
+		if err := s.read.QueryRowContext(ctx, `SELECT peak_working_set_mb FROM jobs WHERE id = ?`, id).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	if got := peak(running.ID); got != 6000 {
+		t.Fatalf("running job peak = %d, want 6000", got)
+	}
+	// Completed ten minutes ago: a late report still reaches it.
+	done := now.Add(-10 * time.Minute)
+	started := now.Add(-time.Hour)
+	if _, _, err := s.ApplyJob(ctx, &Job{GitHubJobID: 5001, State: JobCompleted, Conclusion: "success",
+		Repo: "eyupio/zoomies", Workflow: "CI", JobName: "build", StartedAt: &started, CompletedAt: &done}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordJobWorkingSet(ctx, "run_1", 8192, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := peak(running.ID); got != 8192 {
+		t.Fatalf("after a late final report the peak = %d, want 8192", got)
+	}
+	// Past WorkingSetLateReport it does not.
+	if err := s.RecordJobWorkingSet(ctx, "run_1", 9999, true, now.Add(WorkingSetLateReport)); err != nil {
+		t.Fatal(err)
+	}
+	if got := peak(running.ID); got != 8192 {
+		t.Fatalf("a report past the late window changed the peak to %d", got)
+	}
+	// Untrusted, for good: a later trusted report does not undo it.
+	if err := s.RecordJobWorkingSet(ctx, "run_1", 0, false, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordJobWorkingSet(ctx, "run_1", 9000, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := peak(running.ID); got != -1 {
+		t.Fatalf("an untrusted job's peak = %d, want -1 for good", got)
+	}
+	// A runner with no job in reach records nothing and fails nothing.
+	if err := s.RecordJobWorkingSet(ctx, "run_none", 5000, true, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Both histories read the working set, job by job, once enough trusted runs
+// have it.
 func TestTheHistoriesReadTheWorkingSetOnceEnoughRunsHaveIt(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	n := 0
-	record := func(job string, mb, wsMB int64, at time.Time) string {
+	record := func(job string, mb, wsMB int64, trusted bool, at time.Time) {
 		n++
 		runner := "run_" + strings.Repeat("w", n)
 		usageJob(t, s, n, job, "pool_a", runner, JobInProgress, at)
 		if err := s.RecordJobUsage(ctx, runner, 1, mb); err != nil {
 			t.Fatal(err)
 		}
-		for _, w := range []int64{wsMB, wsMB / 2, 0} { // a later, smaller sample lowers nothing
-			if err := s.RecordJobWorkingSet(ctx, runner, w); err != nil {
+		if wsMB > 0 || !trusted {
+			if err := s.RecordJobWorkingSet(ctx, runner, wsMB, trusted, at); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -65,40 +167,46 @@ func TestTheHistoriesReadTheWorkingSetOnceEnoughRunsHaveIt(t *testing.T) {
 			Repo: "eyupio/zoomies", Workflow: "CI", JobName: job, StartedAt: &at, CompletedAt: &done}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.RecordJobWorkingSet(ctx, runner, 99999); err != nil { // finished: not charged
-			t.Fatal(err)
+	}
+	for i := range 10 {
+		record("heavy", 8192, 0, true, versionsEpoch.Add(time.Duration(i)*time.Minute))
+	}
+	for i := range 6 { // six partial measurements of the heavy job: never trusted
+		record("heavy", 8192, 512, false, versionsEpoch.Add(30*time.Minute+time.Duration(i)*time.Minute))
+	}
+	for i := range 5 {
+		record("light", 1500, 1024, true, versionsEpoch.Add(time.Hour+time.Duration(i)*time.Minute))
+	}
+	heavy := JobUsageKey{Repo: "eyupio/zoomies", Workflow: "CI", JobName: "heavy", PoolID: "pool_a"}
+	light := JobUsageKey{Repo: "eyupio/zoomies", Workflow: "CI", JobName: "light", PoolID: "pool_a"}
+	jobs, err := s.JobUsageHistory(ctx, []JobUsageKey{heavy, light})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range jobs[heavy] {
+		if p.MemoryMB != 8192 {
+			t.Fatalf("the heavy job, never trusted, read %+v; want 8192 throughout", p)
 		}
-		return runner
 	}
-	for i := range 10 { // ten old runs, then five new ones
-		record("build", 12000, 0, versionsEpoch.Add(time.Duration(i)*time.Minute))
+	if l := jobs[light]; len(l) != 5 || l[0].MemoryMB != 1024 {
+		t.Fatalf("the light job = %+v, want five runs at 1024", l)
 	}
-	key := JobUsageKey{Repo: "eyupio/zoomies", Workflow: "CI", JobName: "build", PoolID: "pool_a"}
-	read := func() ([]JobPeak, []JobPeak) {
-		jobs, err := s.JobUsageHistory(ctx, []JobUsageKey{key})
-		if err != nil {
-			t.Fatal(err)
+	pools, err := s.PoolUsageHistory(ctx, []string{"pool_a"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, l := 0, 0
+	for _, p := range pools["pool_a"] {
+		switch p.MemoryMB {
+		case 8192:
+			h++
+		case 1024:
+			l++
+		default:
+			t.Fatalf("pool run read %+v", p)
 		}
-		pools, err := s.PoolUsageHistory(ctx, []string{"pool_a"}, 100)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return jobs[key], pools["pool_a"]
 	}
-	for i := range 4 {
-		record("build", 12000, 7000, versionsEpoch.Add(time.Hour+time.Duration(i)*time.Minute))
-	}
-	if j, p := read(); len(j) != 14 || j[0].MemoryMB != 12000 || len(p) != 14 || p[0].MemoryMB != 12000 {
-		t.Fatalf("with four new runs the history switched: job %+v pool %+v", j, p)
-	}
-	record("build", 12000, 7000, versionsEpoch.Add(2*time.Hour))
-	j, p := read()
-	if len(j) != 5 || len(p) != 5 {
-		t.Fatalf("with five new runs: job %d runs, pool %d, want 5 and 5", len(j), len(p))
-	}
-	for _, r := range append(j, p...) {
-		if r.MemoryMB != 7000 || r.WorkingSetMB != 7000 {
-			t.Fatalf("a run read %+v, want its 7000 MB working set", r)
-		}
+	if h != 16 || l != 5 {
+		t.Fatalf("pool history: %d heavy and %d light runs, want 16 and 5", h, l)
 	}
 }

@@ -61,6 +61,7 @@ func (a *Agent) sampleStats(ctx context.Context) {
 					a.log.Debug("runner stats are unavailable; retaining the last sample",
 						"runner", r.runnerID, "error", err)
 					a.noteStatsMiss(r)
+					a.noteWorkingSet(r.runnerID, r.handle, 0, a.now())
 					continue
 				}
 				sampledAt := a.now()
@@ -68,9 +69,8 @@ func (a *Agent) sampleStats(ctx context.Context) {
 				a.mu.Lock()
 				if current := a.runners[r.runnerID]; current != nil &&
 					current.handle == r.handle && !current.terminal && !current.hostRemoved {
-					current.workingSets = pruneWorkingSets(current.workingSets, sampledAt)
-					stats.WorkingSetPeakBytes = workingSetPeak(stats, current.workingSets, sampledAt)
 					current.stats = stats
+					current.noteWorkingSet(stats.WorkingSetBytes, sampledAt)
 					current.statsMisses = 0
 				}
 				a.mu.Unlock()

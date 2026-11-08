@@ -414,12 +414,17 @@ type tracked struct {
 	state store.RunnerState
 	phase backend.Phase
 	stats backend.Stats
-	// workingSets is the fast working-set readings of the last
-	// workingSetWindow (workingset.go), folded into the next stats sample.
-	workingSets []workingSetSample
-	exitCode    int
-	message     string
-	observedAt  time.Time
+	// The working set's kept peak and coverage (workingset.go): the most any
+	// reading saw, when the last one was, when the container started running,
+	// and whether a gap or a failed reading means the peak may have missed
+	// something.
+	workingSetPeak       int64
+	workingSetLastAt     time.Time
+	runningSince         time.Time
+	workingSetIncomplete bool
+	exitCode             int
+	message              string
+	observedAt           time.Time
 
 	// fault is the classification of a failed end of life. It is kept beside
 	// the message because the heartbeat's copy of this runner is the retry when
@@ -468,7 +473,13 @@ type tracked struct {
 }
 
 func (t *tracked) report() RunnerReport {
+	return t.reportAt(time.Now())
+}
+
+// reportAt is report with the time a running runner's coverage is judged at.
+func (t *tracked) reportAt(now time.Time) RunnerReport {
 	stats := t.stats
+	t.foldWorkingSet(&stats, now)
 	factor := 1.0
 	if t.appliedCPUFactor != nil && *t.appliedCPUFactor > 0 {
 		factor = *t.appliedCPUFactor
@@ -639,8 +650,9 @@ func (a *Agent) Runners() []RunnerReport {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	out := make([]RunnerReport, 0, len(a.runners))
+	now := a.now()
 	for _, r := range a.runners {
-		out = append(out, r.report())
+		out = append(out, r.reportAt(now))
 	}
 	slices.SortFunc(out, func(x, y RunnerReport) int { return strings.Compare(x.RunnerID, y.RunnerID) })
 	return out

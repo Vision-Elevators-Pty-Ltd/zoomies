@@ -1668,6 +1668,7 @@ func (c *Controller) applyReports(ctx context.Context, hostID string, reports []
 			}
 		}
 		resourcesMoved := false
+		c.recordWorkingSet(ctx, r, rep.Stats)
 		if rep.Stats.SampledAt != nil || rep.Stats.CPUPercent != 0 || rep.Stats.MemoryBytes != 0 {
 			sample, _ := json.Marshal(rep.Stats)
 			// Read against the sample it is about to replace, which is why it is
@@ -1685,14 +1686,6 @@ func (c *Controller) applyReports(ctx context.Context, hostID string, reports []
 				// the report.
 				if err := c.st.RecordJobUsage(ctx, r.ID, rep.Stats.CPUPercent/100, rep.Stats.MemoryBytes/(1<<20)); err != nil {
 					c.log.Debug("could not record a job's usage", "runner", r.ID, "error", err)
-				}
-				// Its working set beside it, the most the agent's faster
-				// samples saw since the last report: what the job history
-				// reads once a job has enough runs measured this way.
-				if ws := max(rep.Stats.WorkingSetPeakBytes, rep.Stats.WorkingSetBytes) >> 20; ws > 0 {
-					if err := c.st.RecordJobWorkingSet(ctx, r.ID, ws); err != nil {
-						c.log.Debug("could not record a job's working set", "runner", r.ID, "error", err)
-					}
 				}
 				// What each container of a pair used, which is what a pool's smallest
 				// runner is sized to hold: the window in memory is the last few hours,
@@ -2390,4 +2383,27 @@ func (c *Controller) EmbeddedAgent() *agent.Agent {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.embedded
+}
+
+// recordWorkingSet raises the working-set peak of the runner's job to what a
+// report carries: the most any of the agent's readings of the runner saw. It
+// is recorded for the job in progress, or for the job the runner has just
+// completed, because an ended runner's last report, which carries the peak the
+// job ended on, can arrive after GitHub has closed the job. Whatever the
+// runner's state on this side.
+//
+// The job's working set is marked untrusted, and its old figure kept, where
+// the agent says its readings had a gap or failed, where it sent a usage with
+// no working set (an engine that cannot say, an agent sampling the old way),
+// and for a runner that is not ephemeral, whose kept peak may be an earlier
+// job's.
+func (c *Controller) recordWorkingSet(ctx context.Context, r *store.Runner, s backend.Stats) {
+	ws := max(s.WorkingSetPeakBytes, s.WorkingSetBytes) >> 20
+	if ws <= 0 && s.MemoryBytes <= 0 {
+		return
+	}
+	trusted := ws > 0 && !s.WorkingSetIncomplete && r.Ephemeral
+	if err := c.st.RecordJobWorkingSet(ctx, r.ID, ws, trusted, c.Now()); err != nil {
+		c.log.Debug("could not record a job's working set", "runner", r.ID, "error", err)
+	}
 }

@@ -212,6 +212,10 @@ type WorkflowRunState struct {
 	RunNumber int64
 	// Event is what started the run: push, pull_request, schedule and so on.
 	Event string
+	// Path is the workflow file the run is of (.github/workflows/ci.yml): the
+	// identity of a workflow that its display name, which two files can
+	// share, is not.
+	Path string
 }
 
 // Cancelled reports whether GitHub has finished the whole run as cancelled.

@@ -89,14 +89,15 @@ func vision9PoolUsageHistory(s *Store, ctx context.Context, poolIDs []string, li
 	return out, nil
 }
 
-// withoutWorkingSet is a history with the two fields vision.9 did not have
-// cleared, which nothing outside the switch reads.
+// withoutWorkingSet is a history with the fields vision.9 did not have
+// cleared (all json:"-"), which nothing outside the switch reads.
 func withoutWorkingSet[K comparable](h map[K][]JobPeak) map[K][]JobPeak {
 	out := make(map[K][]JobPeak, len(h))
 	for k, peaks := range h {
 		cp := make([]JobPeak, len(peaks))
 		for i, p := range peaks {
 			p.WorkingSetMB, p.Job = 0, ""
+			p.WorkingSetFinal, p.WorkflowPath, p.SharedName = false, "", false
 			cp[i] = p
 		}
 		out[k] = cp
@@ -126,7 +127,7 @@ func TestTheHistoriesAreVision9sWhateverWorkingSetsAreRecorded(t *testing.T) {
 			}
 		}
 		if ws > 0 || !trusted {
-			if err := s.RecordJobWorkingSet(ctx, runner, ws, trusted, at); err != nil {
+			if err := s.RecordJobWorkingSet(ctx, runner, ws, trusted, true, at); err != nil {
 				t.Fatal(err)
 			}
 		}

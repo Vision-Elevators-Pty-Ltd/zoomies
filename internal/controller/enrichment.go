@@ -121,6 +121,11 @@ func (c *Controller) enrich(ctx context.Context, v store.Enrichment) error {
 			}
 			return err
 		}
+		// The workflow file is what a job's working-set history is
+		// identified by (store.PreferWorkingSet).
+		if err := c.st.SetWorkflowRunPath(ctx, j.Repo, j.GitHubRunID, run.Path); err != nil {
+			return err
+		}
 		if run.RunNumber > 0 || run.Event != "" {
 			if err := c.st.SetRunNumberForRun(ctx, j.Repo, j.GitHubRunID, run.RunNumber); err != nil {
 				return err

@@ -25,11 +25,25 @@ import (
 //   - more than workingSetMaxGap passes, while it runs, without a reading,
 //     counted from the container's start and checked at every reading, every
 //     report and when it ends (up to its exit, where the daemon says when);
-//   - any reading fails or comes back unknown, half of a pair included;
+//   - its first reading came more than workingSetMaxGap after the container
+//     started, checked once the start is known (a new runner can be read
+//     before it is first observed), or the start never became known: the
+//     baseline from start to first reading is established and checked before
+//     every final verdict, whichever way the runner's end was learnt (first
+//     observed already ended, gone from the host, or removed by a task);
+//   - any reading fails or comes back unknown, a running runner's sidecar
+//     included;
 //   - the runner was adopted by this agent rather than watched from its start.
 //
-// A reading of a container that has stopped (no usage at all) is not a
-// reading: the runner has ended, and its end is judged by the readings it had.
+// A reading of a runner whose runner container has stopped (no usage at all)
+// is not a reading: the runner has ended, and its end is judged by the
+// readings it had. That holds for a docker-in-docker pair whose sidecar is
+// still up, which is every pair between its runner's exit and its removal.
+//
+// The verdict is final (WorkingSetReport.Final) once the runner's end has been
+// judged: when its container is seen to have ended, or when a remove task
+// takes it off the host, whose result carries it (the runner is then no
+// longer tracked) and keeps it until that result is accepted.
 //
 // The readings run in a loop of their own, never holding the agent's lock
 // over a call to the daemon, each call bounded by workingSetTimeout and each
@@ -122,13 +136,14 @@ func (a *Agent) sampleWorkingSets(ctx context.Context) {
 	wg.Wait()
 }
 
-// readContainers is one reading of a runner's containers: their working sets
-// added up; readingNone where every one has stopped; readingFailed where any
-// call failed or any running container's working set is unknown.
+// readContainers is one reading of a runner's containers, the runner first:
+// their working sets added up; readingNone where the runner container has
+// stopped, which is the end of its job whatever a sidecar is still doing;
+// readingFailed where any call failed or any running container's working set
+// is unknown, or a sidecar has stopped under a running runner.
 func readContainers(ctx context.Context, u backend.MemoryUpdater, containers []string) int64 {
 	var total int64
-	stopped := 0
-	for _, c := range containers {
+	for i, c := range containers {
 		if ctx.Err() != nil {
 			return readingFailed
 		}
@@ -139,25 +154,28 @@ func readContainers(ctx context.Context, u backend.MemoryUpdater, containers []s
 		case err != nil:
 			return readingFailed
 		case reading.UsageBytes <= 0 && reading.WorkingSetBytes <= 0:
-			stopped++
+			if i == 0 {
+				return readingNone
+			}
+			return readingFailed // a sidecar gone from under a running runner
 		case reading.WorkingSetBytes <= 0:
 			return readingFailed
 		default:
 			total += reading.WorkingSetBytes
 		}
 	}
-	if stopped == len(containers) {
+	if len(containers) == 0 {
 		return readingNone
-	}
-	if stopped > 0 {
-		return readingFailed // half a pair
 	}
 	return total
 }
 
-// fullSampleReading is a full stats sample as a working-set reading.
+// fullSampleReading is a full stats sample as a working-set reading. A pair
+// whose runner half has stopped is no reading, as in readContainers.
 func fullSampleReading(s backend.Stats) int64 {
 	switch {
+	case s.Halves != nil && s.Halves.Runner.MemoryBytes <= 0 && s.Halves.Runner.WorkingSetBytes <= 0:
+		return readingNone
 	case s.MemoryBytes <= 0 && s.WorkingSetBytes <= 0:
 		return readingNone
 	case s.WorkingSetBytes <= 0:
@@ -184,6 +202,9 @@ func (t *tracked) noteWorkingSet(reading int64, now time.Time) {
 	if t.terminal || reading == readingNone {
 		return
 	}
+	if t.workingSetFirstAt.IsZero() {
+		t.workingSetFirstAt = now
+	}
 	t.checkWorkingSetCoverage(now)
 	if reading < 0 {
 		t.workingSetIncomplete = true
@@ -191,6 +212,40 @@ func (t *tracked) noteWorkingSet(reading int64, now time.Time) {
 	}
 	t.workingSetPeak = max(t.workingSetPeak, reading)
 	t.workingSetLastAt = now
+}
+
+// startWorkingSet is the container's start, learnt when the runner is first
+// observed running, or at its end where it never was: coverage counts from it.
+// A runner can be read before it is first observed, a new one included, so its
+// first reading is checked against the start here. A start the daemon did not
+// give cannot be checked against at all: whatever ran between the container's
+// real start and now is unaccounted for, so the run is incomplete, and gaps
+// are counted from now only so that later reports still say so.
+func (t *tracked) startWorkingSet(startedAt, now time.Time) {
+	if startedAt.IsZero() || startedAt.After(now) {
+		t.runningSince = now
+		t.workingSetIncomplete = true
+		return
+	}
+	t.runningSince = startedAt
+	if !t.workingSetFirstAt.IsZero() && t.workingSetFirstAt.Sub(startedAt) > workingSetMaxGap {
+		t.workingSetIncomplete = true
+	}
+}
+
+// sealWorkingSet judges a runner's coverage for its final verdict, under the
+// agent's lock: from the container's start to its first reading, and from its
+// last reading to until, its end. A runner whose start was never learnt (one
+// whose end was the first thing seen of it, or that a remove task took before
+// it was first observed running) has its start established here from what
+// the daemon says, startedAt; where that is not known either, the baseline
+// cannot be established and the run is incomplete. Every way a runner's end is
+// learnt comes through here before the verdict is marked final.
+func (t *tracked) sealWorkingSet(startedAt, until time.Time) {
+	if t.runningSince.IsZero() {
+		t.startWorkingSet(startedAt, until)
+	}
+	t.checkWorkingSetCoverage(until)
 }
 
 // checkWorkingSetCoverage marks the runner incomplete if more than
@@ -207,9 +262,11 @@ func (t *tracked) checkWorkingSetCoverage(until time.Time) {
 }
 
 // closeWorkingSet judges a runner's coverage at its end, before it is marked
-// terminal: up to its exit where the daemon says when it was, otherwise up to
-// now, when its end was seen. A runner that ran is never judged again after.
-func (a *Agent) closeWorkingSet(runnerID string, handle backend.Handle, exitedAt, now time.Time) {
+// terminal (sealWorkingSet): from its start, where the daemon gives it and it
+// was not learnt before, up to its exit where the daemon says when it was,
+// otherwise up to now, when its end was seen. A runner that ran is never
+// judged again after.
+func (a *Agent) closeWorkingSet(runnerID string, handle backend.Handle, startedAt, exitedAt, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	r := a.runners[runnerID]
@@ -220,7 +277,7 @@ func (a *Agent) closeWorkingSet(runnerID string, handle backend.Handle, exitedAt
 	if !exitedAt.IsZero() && exitedAt.Before(now) {
 		until = exitedAt
 	}
-	r.checkWorkingSetCoverage(until)
+	r.sealWorkingSet(startedAt, until)
 }
 
 // workingSetReport is the working set a report of the runner carries, judged
@@ -233,7 +290,49 @@ func (t *tracked) workingSetReport(now time.Time) *WorkingSetReport {
 	if t.workingSetPeak <= 0 && !t.workingSetIncomplete {
 		return nil
 	}
-	return &WorkingSetReport{PeakBytes: t.workingSetPeak, Incomplete: t.workingSetIncomplete}
+	return &WorkingSetReport{PeakBytes: t.workingSetPeak, Incomplete: t.workingSetIncomplete, Final: t.terminal}
+}
+
+// removedWorkingSetKeep bounds how long the final working set of a removed
+// runner waits for its remove task's result to be accepted: the controller
+// redelivers an unanswered task long before, and a runner it has given up on
+// is not worth keeping a peak for.
+const removedWorkingSetKeep = time.Hour
+
+type removedWorkingSet struct {
+	report *WorkingSetReport
+	at     time.Time
+}
+
+// removeWorkingSet is the final working set of a runner a remove task is
+// taking off the host, judged (sealWorkingSet) up to now where its end was not
+// seen, and kept (removedWorkingSets) until reportRemoved has had it accepted.
+// A runner removed before it was ever observed running has no start to count
+// from, the removed container's start having gone with it, so its verdict is
+// incomplete. A runner that is no longer tracked gives what was kept for it,
+// if anything: the task was redelivered because its first answer was lost.
+func (a *Agent) removeWorkingSet(runnerID string, now time.Time) *WorkingSetReport {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for id, kept := range a.removedWorkingSets {
+		if now.Sub(kept.at) > removedWorkingSetKeep {
+			delete(a.removedWorkingSets, id)
+		}
+	}
+	r := a.runners[runnerID]
+	if r == nil {
+		return a.removedWorkingSets[runnerID].report
+	}
+	if !r.terminal {
+		r.sealWorkingSet(time.Time{}, now)
+	}
+	ws := r.workingSetReport(now)
+	if ws == nil {
+		return nil
+	}
+	ws.Final = true
+	a.removedWorkingSets[runnerID] = removedWorkingSet{report: ws, at: now}
+	return ws
 }
 
 // attachWorkingSets puts each tracked runner's working set on its reports:

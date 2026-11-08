@@ -954,8 +954,8 @@ type Scheduler struct {
 	// booking, history raise and profiles, reads jobs' working-set peaks
 	// (peak_working_set_mb) where enough runs of a job have one. Off, the
 	// default, reads peak_memory_mb exactly as before the column existed;
-	// the column is still recorded. Not to be turned on before the switch's
-	// open findings are fixed (see the setting's summary).
+	// the column is still recorded. Off until the operator turns it on (see
+	// the setting's summary).
 	WorkingSetHistory string `yaml:"working_set_history"`
 	// WorkingSetSampling is on or off: whether agents read each running
 	// runner's working set every 10 seconds between their 30-second stats

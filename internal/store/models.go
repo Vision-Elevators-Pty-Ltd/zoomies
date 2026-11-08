@@ -864,9 +864,45 @@ type RunnerSettings struct {
 	// the same path (not the docker-in-docker sidecar). Only those in
 	// PoolDevices, and only on a pool whose host_selector selects the label
 	// each needs, so the pool is placed only on hosts that have it. The fleet
-	// has no default: empty is none.
+	// has no default: empty is none. Such a pool must use docker_mode none:
+	// a privileged docker-in-docker sidecar receives the host's devices
+	// whatever Devices says, and a host socket can ask the daemon for them.
 	Devices []string `json:"devices,omitempty"`
+	// DevicesChangedAt is when Devices last changed: the API sets it to the
+	// zero time when they do, and the store stamps the write's time. A runner
+	// of the pool created before it was made under the old devices (a
+	// container keeps the mappings it was created with) and is retired as soon
+	// as it is not running a job; a create queued before it is not delivered.
+	DevicesChangedAt *time.Time `json:"devices_changed_at,omitempty"`
 }
+
+// DevicesChanged reports whether two device lists differ as sets.
+func DevicesChanged(before, after []string) bool {
+	a, b := slices.Clone(before), slices.Clone(after)
+	slices.Sort(a)
+	slices.Sort(b)
+	return !slices.Equal(slices.Compact(a), slices.Compact(b))
+}
+
+// FeatureDevices is advertised by an agent that maps a pool's
+// runner_settings.devices into its runners and checks them before it creates
+// one. An agent older than the field ignores it and creates an ordinary runner
+// without the device, reporting success, so a pool that maps devices is placed
+// only on hosts whose agent says this (scheduler.HostSelects). Named here, not
+// beside the agent's other features, because the scheduler reads it.
+const FeatureDevices = "devices"
+
+// FeatureDevicesOnly is advertised by an agent started with
+// agent.devices_only: the agent of a principal that holds device access no
+// other daemon on the machine has (on ci-nl-01/02, the runner-emu user, whose
+// rootless daemon alone has the kvm group mapped). It is given runners of
+// pools that map devices and nothing else (scheduler.HostSelects), and itself
+// refuses any other create, so a broad selector such as pool: pr can never
+// put a general job on the daemon that can open /dev/kvm.
+const FeatureDevicesOnly = "devices-only"
+
+// MapsDevices reports whether the pool maps host devices into its runners.
+func (p *Pool) MapsDevices() bool { return p != nil && len(p.RunnerSettings.Devices) > 0 }
 
 // DeviceLabel is the host label a pool must select to map a device.
 type DeviceLabel struct{ Key, Value string }
@@ -881,9 +917,10 @@ var PoolDevices = map[string]DeviceLabel{
 }
 
 // DeviceProblems is what is wrong with a pool's devices: one not in
-// PoolDevices, one named twice, or one whose label the pool's host_selector
-// does not select. Empty where nothing is.
-func DeviceProblems(devices []string, hostSelector map[string]string, backend BackendKind) []string {
+// PoolDevices, one named twice, one whose label the pool's host_selector does
+// not select, a backend with no containers, or a Docker mode other than none.
+// Empty where nothing is.
+func DeviceProblems(devices []string, hostSelector map[string]string, backend BackendKind, dockerMode DockerMode) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, d := range devices {
@@ -905,6 +942,9 @@ func DeviceProblems(devices []string, hostSelector map[string]string, backend Ba
 	}
 	if len(devices) > 0 && backend != BackendDocker && backend != BackendPodman {
 		out = append(out, fmt.Sprintf("devices can be mapped only into container runners; the %s backend has none", backend))
+	}
+	if len(devices) > 0 && dockerMode != DockerNone && dockerMode != "" {
+		out = append(out, fmt.Sprintf("a pool that maps devices must use docker_mode none, not %s: a privileged docker-in-docker sidecar is given every host device whatever the pool maps, and a host socket lets a job ask the daemon for any of them", dockerMode))
 	}
 	return out
 }

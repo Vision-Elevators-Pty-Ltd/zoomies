@@ -154,6 +154,7 @@ func runAgentDaemon(ctx context.Context, e *env, args []string) error {
 		WorkDir:            cfg.Agent.WorkDir,
 		Capacity:           cfg.Agent.Capacity,
 		Labels:             cfg.Agent.Labels,
+		DevicesOnly:        cfg.Agent.DevicesOnly,
 		Backends:           backends,
 		DefaultBackend:     store.BackendKind(cfg.Agent.Backend),
 		Transport:          transport,

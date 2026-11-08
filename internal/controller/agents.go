@@ -1266,7 +1266,7 @@ func (c *Controller) PollTasks(ctx context.Context, hostID string, wait time.Dur
 	if !c.mayAct() {
 		return &agent.TaskBatch{Backoff: time.Second}, nil
 	}
-	if tasks := q.take(maxTasksPerPoll, c.Now()); len(tasks) > 0 {
+	if tasks := c.gateDeviceCreates(ctx, hostID, q, q.take(maxTasksPerPoll, c.Now())); len(tasks) > 0 {
 		c.stampIssued(ctx, tasks)
 		return &agent.TaskBatch{Tasks: tasks}, nil
 	}
@@ -1298,7 +1298,7 @@ func (c *Controller) PollTasks(ctx context.Context, hostID string, wait time.Dur
 		if !c.mayAct() {
 			return &agent.TaskBatch{Backoff: time.Second}, nil
 		}
-		tasks := q.take(maxTasksPerPoll, c.Now())
+		tasks := c.gateDeviceCreates(ctx, hostID, q, q.take(maxTasksPerPoll, c.Now()))
 		c.stampIssued(ctx, tasks)
 		return &agent.TaskBatch{Tasks: tasks}, nil
 	}

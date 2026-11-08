@@ -256,11 +256,21 @@ func (o *optionalMB) UnmarshalJSON(b []byte) error {
 // carried it.
 func (in *runnerSettingsIn) apply(rs *store.RunnerSettings, add func(field, msg string)) {
 	if in.Devices.present {
+		before := rs.Devices
 		rs.Devices = nil
 		for _, d := range in.Devices.value {
 			if d = strings.TrimSpace(d); d != "" {
 				rs.Devices = append(rs.Devices, d)
 			}
+		}
+		if store.DevicesChanged(before, rs.Devices) {
+			// The pool's runners made before now keep the old devices; the
+			// scheduler retires them and no create queued before now is
+			// delivered (scheduler.staleDevices, controller's
+			// deviceCreateRefusal). PATCH and import both fold through here.
+			// A zero time asks the store to stamp the write's own time, the
+			// clock runner rows are created by.
+			rs.DevicesChangedAt = &time.Time{}
 		}
 	}
 	if in.ShmSizeMB.present {
@@ -987,7 +997,7 @@ func (s *Server) validatePool(ctx context.Context, p *store.Pool, existingID str
 			break
 		}
 	}
-	for _, problem := range store.DeviceProblems(p.RunnerSettings.Devices, p.HostSelector, p.Backend) {
+	for _, problem := range store.DeviceProblems(p.RunnerSettings.Devices, p.HostSelector, p.Backend, p.DockerMode) {
 		add("runner_settings.devices", problem)
 	}
 	for k := range p.ProviderSelector {

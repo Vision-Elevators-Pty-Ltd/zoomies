@@ -66,6 +66,17 @@ const FeatureDaemonShare = "daemon-share"
 // which is why the scheduler reads this flag and charges such a host for both.
 const FeatureDinDSharedLimit = store.FeatureDinDSharedLimit
 
+// FeatureDevices is advertised by an agent that maps a pool's
+// runner_settings.devices into its runners. An older agent decodes a spec's
+// devices as an unknown field, ignores it and starts an ordinary runner, so the
+// scheduler places a pool that maps devices only on hosts that say this.
+const FeatureDevices = store.FeatureDevices
+
+// FeatureDevicesOnly is advertised by an agent started with
+// agent.devices_only, which takes runners of pools that map devices and no
+// others.
+const FeatureDevicesOnly = store.FeatureDevicesOnly
+
 // FeatureSelfUpdate is advertised by an agent that understands TaskUpdateAgent
 // and can carry it out on this host. An older agent does not ignore the kind, it
 // reports the task failed with "unknown task kind", so the controller asks for

@@ -16,7 +16,18 @@ import (
 //
 // The agent checks every device on its own host before it creates anything,
 // and refuses the runner with an error that says what to fix where the device
-// is missing, is not a device, or could not be opened by the runner:
+// is missing, is not a device, or by its metadata could not be opened by the
+// runner. The check is a prediction, not proof: it reads the device node's
+// mode and group and the daemon's group map, as the agent's own user, and
+// never opens the device in the runner's context. An ACL, an LSM rule, the
+// daemon's device cgroup, a runtime that drops supplementary groups (runc
+// skips them where setgroups is denied in the namespace) or a KVM module that
+// cannot run guests all pass it and fail at the job. A host is certified for a
+// device pool by the smoke test in docs/hosts-and-pools.md, run as the
+// daemon's user through the daemon itself, never by this check passing. The
+// group map is found only beside a rootless Docker socket (rootlesskit's
+// state); rootless Podman has none there, so under it only a device every
+// user may open passes. The rules it predicts by:
 //
 //   - a device every user may read and write needs nothing more;
 //   - under a daemon that runs as root, the runner is given the device's group
@@ -53,8 +64,9 @@ type deviceHost struct {
 
 type idRange struct{ inside, outside, count int64 }
 
-// checkDevices decides, for every device a spec asks for, whether a runner
-// on this host can open it, and with which groups.
+// checkDevices predicts, for every device a spec asks for, whether a runner
+// on this host can open it by the device's metadata, and with which groups.
+// See the comment above: it does not open the device.
 func checkDevices(spec Spec, host deviceHost) (deviceAccess, error) {
 	var out deviceAccess
 	for _, dev := range spec.Devices {
@@ -70,13 +82,13 @@ func checkDevices(spec Spec, host deviceHost) (deviceAccess, error) {
 		case perm&0o006 == 0o006:
 			// Every user may open it.
 		case perm&0o060 != 0o060:
-			return deviceAccess{}, fmt.Errorf("backend: pool %q maps %s into its runners, and neither its group nor every user may read and write it (mode %s)", spec.PoolName, dev, perm)
+			return deviceAccess{}, fmt.Errorf("backend: pool %q maps %s into its runners, and by its mode a runner could not open it: neither its group nor every user may read and write it (mode %s)", spec.PoolName, dev, perm)
 		case !host.rootless:
 			out.groups = appendGroup(out.groups, strconv.Itoa(gid))
 		default:
 			inside, ok := translateID(host.gidMap, int64(gid))
 			if !ok {
-				return deviceAccess{}, fmt.Errorf("backend: pool %q maps %s into its runners, and a runner of this rootless daemon cannot open it: it is mode %s, group %d, and group %d is not mapped into the daemon's user namespace. Either map it (an /etc/subgid entry \"<user>:%d:1\" for the daemon's user, then restart that user's rootless docker) or let every user open the device (udev: KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"0666\")", spec.PoolName, dev, perm, gid, gid, gid)
+				return deviceAccess{}, fmt.Errorf("backend: pool %q maps %s into its runners, and by its metadata a runner of this rootless daemon could not open it: it is mode %s, group %d, and group %d is not mapped into the daemon's user namespace. Either map it (an /etc/subgid entry \"<user>:%d:1\" for the daemon's user, then restart that user's rootless docker) or let every user open the device (udev: KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"0666\")", spec.PoolName, dev, perm, gid, gid, gid)
 			}
 			out.groups = appendGroup(out.groups, strconv.FormatInt(inside, 10))
 		}
@@ -147,7 +159,9 @@ func rootlessGIDMap(socket string) ([]idRange, error) {
 	return parseIDMap(string(data))
 }
 
-// devicesOnThisHost is checkDevices against this agent's host and daemon.
+// devicesOnThisHost is checkDevices against this agent's host and daemon: a
+// prediction from metadata, which a passing smoke test on the host is what
+// certifies.
 func (b *DockerBackend) devicesOnThisHost(spec Spec) (deviceAccess, error) {
 	if len(spec.Devices) == 0 {
 		return deviceAccess{}, nil

@@ -104,13 +104,16 @@ type poolDocument struct {
 }
 
 type poolDocumentTimings struct {
-	ProvisionTimeout  *string  `json:"provision_timeout"`
-	DrainTimeout      *string  `json:"drain_timeout"`
-	MaxRunnerLifetime *string  `json:"max_runner_lifetime"`
-	ScaleUpDelay      *string  `json:"scale_up_delay"`
-	DockerWait        *string  `json:"docker_wait"`
-	ShmSizeMB         *int64   `json:"shm_size_mb"`
-	Devices           []string `json:"devices,omitempty"`
+	ProvisionTimeout  *string `json:"provision_timeout"`
+	DrainTimeout      *string `json:"drain_timeout"`
+	MaxRunnerLifetime *string `json:"max_runner_lifetime"`
+	ScaleUpDelay      *string `json:"scale_up_delay"`
+	DockerWait        *string `json:"docker_wait"`
+	ShmSizeMB         *int64  `json:"shm_size_mb"`
+	// Devices is always written, [] for a pool that maps none: import reads
+	// an absent list as "keep the target's", so an omitted empty list let a
+	// no-device pool imported over a device-enabled one keep its devices.
+	Devices []string `json:"devices"`
 }
 
 func durationText(d *store.Duration) *string {
@@ -157,7 +160,7 @@ func documentPool(p *store.Pool, installation string) poolDocument {
 			ScaleUpDelay:      durationText(p.RunnerSettings.ScaleUpDelay),
 			DockerWait:        durationText(p.RunnerSettings.DockerWait),
 			ShmSizeMB:         p.RunnerSettings.ShmSizeMB,
-			Devices:           p.RunnerSettings.Devices,
+			Devices:           append([]string{}, p.RunnerSettings.Devices...),
 		},
 		Cache:            p.Cache,
 		Tmpfs:            p.Tmpfs,

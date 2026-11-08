@@ -7765,12 +7765,17 @@ export interface components {
              */
             shm_size_mb?: number | null;
             /**
-             * @description Host devices mapped into this pool's runner containers at the same path (not a docker-in-docker sidecar), for jobs such as an Android emulator that need `/dev/kvm`. Only `/dev/kvm`, only on the docker and podman backends, and only on a pool whose `host_selector` selects `kvm: ok`, so it is placed only on hosts labelled with it. The agent checks the device before it creates a runner and refuses one it cannot give, saying why: a missing device, or one the runner's user could not open. No fleet default: absent keeps the pool's, `null` or `[]` maps none. An agent older than the option ignores it, which is why the host label, not the agent, decides placement.
+             * @description Host devices mapped into this pool's runner containers at the same path (not a docker-in-docker sidecar), for jobs such as an Android emulator that need `/dev/kvm`. Only `/dev/kvm`, only on the docker and podman backends, only with `docker_mode: none` (a privileged docker-in-docker sidecar is given every host device, and a host socket can ask for one), and only on a pool whose `host_selector` selects `kvm: ok`. Such a pool is placed only on hosts labelled with it whose agent advertises the `devices` feature (an older agent would ignore the option). The agent predicts from the device's metadata whether the runner can open it and refuses one it cannot give, saying why; that check does not open the device, so a host is certified by a smoke test. No fleet default: absent keeps the pool's, `null` or `[]` maps none. Changing the list replaces the pool's runners made before the change once they are not running a job, and a create queued before it is not delivered; so does removing `kvm=ok` from a host.
              * @example [
              *       "/dev/kvm"
              *     ]
              */
             devices?: "/dev/kvm"[] | null;
+            /**
+             * Format: date-time
+             * @description When `devices` last changed. Runners of the pool created before it are replaced as soon as they are not running a job. Set by the server; not accepted as input.
+             */
+            readonly devices_changed_at?: string | null;
         };
         /** @description One host's room for a pool: what it promises, what the machine can back at that pool's size, and what one runner of it is charged there. */
         PoolHostRoom: {
@@ -8413,6 +8418,7 @@ export interface components {
                 docker_wait?: string | null;
                 /** Format: int64 */
                 shm_size_mb?: number | null;
+                /** @description Always written, [] for a pool that maps none, so an import clears a target's devices. */
                 devices?: string[];
             };
             cache: components["schemas"]["CacheConfig"];

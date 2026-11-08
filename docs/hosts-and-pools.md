@@ -787,32 +787,60 @@ does not set it is unchanged. The sidecar of a docker-in-docker pool is not
 given the device.
 
 - **Placement.** A pool that maps `/dev/kvm` must select `kvm: ok` in its
-  `host_selector`, and the API refuses it otherwise. The ordinary host-selector
-  match then places it only on hosts labelled `kvm=ok`. Label a host so only if
-  `/dev/kvm` really exists there (ci-nl-01 and ci-nl-02 have it; sa-ci-01 does
-  not).
-- **The agent's check.** Before it pulls or creates anything, the agent checks
-  each device on its own host. It refuses the runner, with an error saying what
-  to fix, where the device is missing, is not a character device, or could not
-  be opened by the runner's user.
+  `host_selector` and use `docker_mode: none`, and the API refuses it
+  otherwise; the agent refuses such a runner too. A privileged docker-in-docker
+  sidecar is given every host device whatever the pool maps, and a host socket
+  lets a job ask the daemon for any, so neither may carry a device. The pool is
+  placed only on hosts labelled `kvm=ok` whose agent advertises the `devices`
+  feature: an agent older than the option would ignore it and start a runner
+  without the device, so it is never given the pool.
+- **Reserved agents.** An agent started with `agent.devices_only: true`
+  (`ZOOMIES_AGENT_DEVICES_ONLY=true`) is given runners of pools that map
+  devices and nothing else, and refuses any other create itself. That is how a
+  daemon that can open `/dev/kvm` is kept from general jobs whose selector
+  (such as `pool: pr`) also matches its host.
+- **Changes reach existing runners.** A container keeps the devices it was
+  created with. When a pool's `devices` change (by edit or import), its
+  runners made before the change are replaced as soon as they are not running
+  a job, and a create still queued for a host is not delivered. Removing
+  `kvm=ok` from a host, or replacing its agent with one that does not map
+  devices, does the same for the device runners on that host. A busy runner
+  finishes its job first. An export always writes `devices`, `[]` for a pool
+  that maps none, so importing it clears a target's devices.
+- **The agent's check is a prediction.** Before it pulls or creates anything,
+  the agent reads each device's mode and group and the daemon's group map, and
+  refuses the runner, with an error saying what to fix, where the device is
+  missing, is not a character device, or by that metadata could not be opened
+  by the runner. It does not open the device in the runner's context: an ACL,
+  an LSM rule, the daemon's device cgroup, a runtime that drops supplementary
+  groups (runc does where `setgroups` is denied) or a KVM module that cannot
+  run guests all pass it. Rootless Podman has no group map where the agent
+  looks, so under it only a device every user may open passes. Certify a host
+  with the smoke test below, never by the check passing.
 - **Who can open it.** On the hosts, `/dev/kvm` is `crw-rw---- root kvm`.
   - Under a daemon that runs as root, the runner is given the device's group
     as a supplementary group, like the host socket's.
   - Under rootless Docker, which the agents use, putting the agent's user in
-    the `kvm` group is necessary but not enough. runc sets the container's own
-    groups, so the host user's supplementary groups do not reach the runner:
-    measured on ci-nl-02 on 8 November 2026, a container had only its own
-    group, and `/dev/kvm` showed as `65534:65534`.
-  - For rootless Docker, do one of these on the host:
-    - **Map the kvm group into the user's namespace.** Add an `/etc/subgid`
-      entry `<user>:<kvm gid>:1` for the agent's user, then restart that user's
-      rootless docker, which ends its running runners: do it in a maintenance
-      window. The agent reads the daemon's group map (rootlesskit's
-      `child_pid`) and gives the runner the group `kvm` is mapped to.
-    - **Let every user open the device** with a udev rule:
-      `KERNEL=="kvm", GROUP="kvm", MODE="0666"`, applied with
-      `udevadm trigger --name-match=kvm`. GitHub's hosted runners do the
-      same. No group is then needed.
+    the `kvm` group is not enough. runc sets the container's own groups, so
+    the host user's supplementary groups do not reach the runner: measured on
+    ci-nl-02 on 8 November 2026, a container had only its own group, and
+    `/dev/kvm` showed as `65534:65534`.
+  - For rootless Docker, map the kvm group into the namespace of a daemon used
+    only for device pools: add an `/etc/subgid` entry `<user>:<kvm gid>:1` for
+    that daemon's user, then restart that user's rootless docker, which ends
+    its running runners. The agent reads the daemon's group map (rootlesskit's
+    `child_pid`) and gives the runner the group `kvm` is mapped to. The grant
+    is authority over host gid `kvm` for every container of that daemon, so
+    give it to a dedicated user whose agent is reserved (`agent.devices_only`),
+    not to a daemon that runs general jobs.
+  - A udev rule making `/dev/kvm` `0666` also works, but lets every local
+    account, and every privileged sidecar on the machine, reach KVM. Do not use
+    it on shared CI hosts.
+- **Smoke test.** As the reserved daemon's user, through that daemon:
+  `docker run --rm --device /dev/kvm --group-add <mapped gid> <runner image>
+  sh -c 'id; ls -ln /dev/kvm; test -r /dev/kvm && test -w /dev/kvm'`, then
+  an emulator job (or `KVM_GET_API_VERSION`) on the pool. Certify the host
+  only once this passes, and again after a reboot.
 
 ### Keeping the work folder in memory
 

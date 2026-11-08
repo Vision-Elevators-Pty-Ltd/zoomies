@@ -1,7 +1,10 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -222,5 +225,119 @@ func TestAPoolMapsKVMOnlyOnKVMHosts(t *testing.T) {
 	res.into(t, &cleared)
 	if len(cleared.RunnerSettings.Devices) != 0 {
 		t.Fatalf("null left devices %v", cleared.RunnerSettings.Devices)
+	}
+}
+
+// Review of #23, finding 2, the review's probe made permanent: a pool that
+// maps no devices is exported with "devices": [], so importing it over a
+// same-named pool that maps /dev/kvm clears the target's devices, whichever
+// selector the source has. The change is stamped, so the target's runners
+// made with /dev/kvm are replaced (scheduler.staleDevices).
+func TestANoDeviceExportClearsAnImportedPoolsDevices(t *testing.T) {
+	for _, sel := range []store.StringMap{{"kvm": "ok"}, {}} {
+		t.Run(fmt.Sprint(sel), func(t *testing.T) {
+			h := newHarness(t)
+			inst := h.installation()
+			u, _ := h.user("operator", store.RoleOperator)
+			cookie := h.session(u)
+			body := poolBody(inst.ID)
+			body["host_selector"] = map[string]string{"kvm": "ok"}
+			body["runner_settings"] = map[string]any{"devices": []string{"/dev/kvm"}}
+			res := h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body})
+			res.mustStatus(t, http.StatusCreated, "create the device pool")
+			var created controller.PoolView
+			res.into(t, &created)
+			target, err := h.st.GetPool(h.ctx, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := *target
+			source.RunnerSettings = store.RunnerSettings{}
+			source.HostSelector = sel
+			raw, err := json.Marshal(map[string]any{"pools": []poolDocument{documentPool(&source, inst.Target)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), `"devices":[]`) {
+				t.Fatalf("the export of a pool with no devices does not say so: %s", raw)
+			}
+			h.do(request{method: http.MethodPost, path: "/api/v1/pools/import", cookie: cookie,
+				body: map[string]any{"document": string(raw)}}).mustStatus(t, http.StatusOK, "import")
+			after, err := h.st.GetPool(h.ctx, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(after.RunnerSettings.Devices) != 0 {
+				t.Fatalf("the imported pool kept devices %v", after.RunnerSettings.Devices)
+			}
+			if at := after.RunnerSettings.DevicesChangedAt; at == nil || at.IsZero() {
+				t.Fatal("clearing the devices by import was not stamped")
+			}
+		})
+	}
+}
+
+// Review of #23, finding 1: a PATCH that changes the devices stamps the
+// change; one that leaves them alone does not move the stamp.
+func TestChangingAPoolsDevicesIsStamped(t *testing.T) {
+	h := newHarness(t)
+	inst := h.installation()
+	u, _ := h.user("operator", store.RoleOperator)
+	cookie := h.session(u)
+	body := poolBody(inst.ID)
+	body["host_selector"] = map[string]string{"kvm": "ok"}
+	res := h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body})
+	res.mustStatus(t, http.StatusCreated, "create")
+	var created controller.PoolView
+	res.into(t, &created)
+	stamp := func() *time.Time {
+		p, err := h.st.GetPool(h.ctx, created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p.RunnerSettings.DevicesChangedAt
+	}
+	if stamp() != nil {
+		t.Fatal("a pool that never mapped devices is stamped")
+	}
+	patch := func(rs map[string]any) {
+		h.do(request{method: http.MethodPatch, path: "/api/v1/pools/" + created.ID, cookie: cookie,
+			body: map[string]any{"runner_settings": rs}}).mustStatus(t, http.StatusOK, "patch")
+	}
+	patch(map[string]any{"devices": []string{"/dev/kvm"}})
+	added := stamp()
+	if added == nil || added.IsZero() {
+		t.Fatal("adding /dev/kvm was not stamped")
+	}
+	patch(map[string]any{"shm_size_mb": 2048})
+	patch(map[string]any{"devices": []string{"/dev/kvm"}})
+	if got := stamp(); got == nil || !got.Equal(*added) {
+		t.Fatalf("an unchanged device list moved the stamp from %v to %v", added, got)
+	}
+	time.Sleep(2 * time.Millisecond)
+	patch(map[string]any{"devices": nil})
+	if got := stamp(); got == nil || !got.After(*added) {
+		t.Fatalf("clearing the devices did not move the stamp: %v", got)
+	}
+}
+
+// Review of #23, finding 3: a pool that maps devices must use docker_mode
+// none, through the API as on the agent.
+func TestADevicePoolMustUseDockerModeNone(t *testing.T) {
+	h := newHarness(t)
+	inst := h.installation()
+	u, _ := h.user("operator", store.RoleOperator)
+	cookie := h.session(u)
+	for _, mode := range []string{"dind", "host-socket"} {
+		body := poolBody(inst.ID)
+		body["name"] = "emulator-" + mode
+		body["docker_mode"] = mode
+		body["host_selector"] = map[string]string{"kvm": "ok"}
+		body["runner_settings"] = map[string]any{"devices": []string{"/dev/kvm"}}
+		res := h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body})
+		res.mustNotSucceed(t, "devices with docker_mode "+mode)
+		if !strings.Contains(string(res.body), "docker_mode none") {
+			t.Fatalf("%s: the refusal does not say why: %s", mode, res.body)
+		}
 	}
 }

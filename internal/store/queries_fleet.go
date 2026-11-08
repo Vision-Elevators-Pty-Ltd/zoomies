@@ -329,6 +329,14 @@ func (s *Store) poolInsert(p *Pool) (string, []any, error) {
 
 // poolJSON encodes the six columns a pool keeps as JSON documents.
 func poolJSON(p *Pool) (res, cache, settings, burst, tmpfs, memoryBurst string, err error) {
+	if at := p.RunnerSettings.DevicesChangedAt; at != nil && at.IsZero() {
+		// The API marks a change of devices with a zero time; it is the
+		// time of this write, by the clock runner rows are created by, to the
+		// nanosecond: a runner row read back to the millisecond in the same
+		// millisecond reads as older, and is replaced rather than trusted.
+		stamp := p.UpdatedAt
+		p.RunnerSettings.DevicesChangedAt = &stamp
+	}
 	if res, err = marshalJSON(p.Resources); err != nil {
 		return
 	}

@@ -119,4 +119,17 @@ func TestOnlyKnownDevicesReachABackend(t *testing.T) {
 	if _, err := (&ProcessBackend{}).CreateWithResult(t.Context(), spec); err == nil || !strings.Contains(err.Error(), "process backend") {
 		t.Fatalf("the process backend: %v", err)
 	}
+	// Review of #23, finding 3, held on the host as well as by the API: a
+	// privileged sidecar gets every host device, and a host socket can ask
+	// the daemon for one.
+	for _, mode := range []store.DockerMode{store.DockerDinD, store.DockerHostSocket} {
+		spec.DockerMode = mode
+		if err := spec.Validate(); err == nil || !strings.Contains(err.Error(), "docker_mode none") {
+			t.Fatalf("devices with docker_mode %s: %v", mode, err)
+		}
+	}
+	spec.DockerMode = store.DockerNone
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
 }

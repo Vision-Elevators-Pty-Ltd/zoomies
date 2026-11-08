@@ -380,6 +380,13 @@ func (s *Spec) Validate() error {
 			return fmt.Errorf("backend: %q is not a device a runner may be given", d)
 		}
 	}
+	if len(s.Devices) > 0 && s.DockerMode != store.DockerNone && s.DockerMode != "" {
+		// A privileged docker-in-docker sidecar is given every host device
+		// whatever HostConfig.Devices says, and a host socket lets the job
+		// ask the daemon for any of them: the pool's API validation says the
+		// same (store.DeviceProblems), and this holds it on the host.
+		return fmt.Errorf("backend: a runner that maps %s must use docker_mode none, not %s", strings.Join(s.Devices, ", "), s.DockerMode)
+	}
 	return nil
 }
 

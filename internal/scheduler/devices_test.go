@@ -81,7 +81,7 @@ func TestOnlyDeviceAgentsTakeDevicePoolsAndReservedAgentsTakeNothingElse(t *test
 	emu = kvmPool()
 	emu.MinRunners = 1
 	pp := only(t, Decide(snap([]*store.Pool{emu}, nil, nil, []*store.Host{old})))
-	if !strings.Contains(pp.Reason, "cannot map the pool's devices") {
+	if !strings.Contains(pp.Reason, "reserved for device pools") {
 		t.Fatalf("reason %q does not say the agent cannot map devices", pp.Reason)
 	}
 }
@@ -171,5 +171,76 @@ func TestRunnersOnAHostTheirDevicePoolNoLongerTakesAreReplaced(t *testing.T) {
 				t.Fatalf("drains = %+v, want one saying %q", drains, tc.drained)
 			}
 		})
+	}
+}
+
+// Review r2 of #23, finding 1: a job that does not ask for the emulator
+// pool's own label is never placed on it, even where it is the only pool whose
+// labels would otherwise match (runs-on: [self-hosted, linux, x64] matches
+// any pool, the implicit labels constraining nothing). A device pool without a
+// label of its own takes no job at all.
+func TestOnlyJobsAskingForTheEmulatorLabelReachTheEmulatorPool(t *testing.T) {
+	emu := kvmPool()
+	emu.Labels = store.NormalizeLabels([]string{"self-hosted", "linux", "x64", "sa-ci-emulator"})
+	for _, tc := range []struct {
+		job  []string
+		want bool
+	}{
+		{[]string{"self-hosted", "linux", "x64"}, false},
+		{[]string{"self-hosted"}, false},
+		{[]string{"linux"}, false},
+		{[]string{"self-hosted", "linux", "x64", "sa-ci-emulator"}, true},
+		{[]string{"sa-ci-emulator"}, true},
+	} {
+		if got := PoolMatches(emu, tc.job); got != tc.want {
+			t.Errorf("PoolMatches(emulator, %v) = %v, want %v", tc.job, got, tc.want)
+		}
+	}
+	bare := kvmPool()
+	bare.Labels = store.NormalizeLabels([]string{"self-hosted", "linux", "x64"})
+	if PoolMatches(bare, []string{"self-hosted", "linux", "x64"}) {
+		t.Error("a device pool with no label of its own took an ordinary job")
+	}
+	// The same pool without devices takes the ordinary job, as before.
+	general := kvmPool()
+	general.Labels = emu.Labels
+	general.RunnerSettings.Devices = nil
+	if !PoolMatches(general, []string{"self-hosted", "linux", "x64"}) {
+		t.Error("a general pool stopped taking an ordinary job")
+	}
+
+	// The whole decision: an ordinary job queued with only the emulator pool
+	// and the reserved agent is not given an emulator runner.
+	plan := Decide(snap([]*store.Pool{emu}, nil, []*store.Job{queued("ordinary", time.Minute, "self-hosted", "linux", "x64")}, []*store.Host{emuHost("emu")}))
+	for _, pp := range plan.Pools {
+		if creates := actionsOf(pp.Actions, ActionCreate); len(creates) != 0 {
+			t.Fatalf("an ordinary job got an emulator runner: %+v", creates)
+		}
+	}
+	plan = Decide(snap([]*store.Pool{emu}, nil, []*store.Job{queued("emulator", time.Minute, "self-hosted", "linux", "x64", "sa-ci-emulator")}, []*store.Host{emuHost("emu")}))
+	if creates := actionsOf(only(t, plan).Actions, ActionCreate); len(creates) != 1 {
+		t.Fatalf("the emulator job got %d creates, want 1", len(creates))
+	}
+}
+
+// Review r2 of #23, finding 3: an ordinary current agent, however it is
+// labelled, never takes a device pool; only an agent reserved for device
+// pools does.
+func TestAnOrdinaryCurrentAgentWithTheLabelsNeverTakesADevicePool(t *testing.T) {
+	ordinary := testHost("runner-pr", 4, 0)
+	ordinary.Labels = store.StringMap{"pool": "pr", "kvm": "ok"}
+	ordinary.Features = store.StringSlice{store.FeatureDevices}
+	if HostSelects(ordinary, kvmPool()) {
+		t.Fatal("an ordinary current agent labelled pool=pr,kvm=ok took the emulator pool")
+	}
+	if !HostSelects(emuHost("emu"), kvmPool()) {
+		t.Fatal("the reserved agent did not take the emulator pool")
+	}
+	// A reserved host whose agent was rolled back (no devices feature, the
+	// reservation kept by the controller) takes neither kind of pool.
+	rolledBack := emuHost("emu")
+	rolledBack.Features = store.StringSlice{store.FeatureDevicesOnly}
+	if HostSelects(rolledBack, kvmPool()) || HostSelects(rolledBack, testPool("general")) {
+		t.Fatal("a reserved host whose agent cannot map devices took a pool")
 	}
 }

@@ -40,3 +40,22 @@ func TestAReservedAgentRefusesARunnerThatMapsNoDevice(t *testing.T) {
 		t.Fatal("a general runner was created on the reserved agent")
 	}
 }
+
+// Review r2 of #23, finding 3: an ordinary agent refuses a runner that maps a
+// device, whatever the controller sent; only a reserved agent's daemon is the
+// one with the device's group mapped.
+func TestAnOrdinaryAgentRefusesARunnerThatMapsADevice(t *testing.T) {
+	a, tr, be, _ := newAgent(t, 1)
+	task := createTask("create", "r")
+	task.Spec.Devices = []string{"/dev/kvm"}
+	a.handleCreate(context.Background(), task, func() {})
+	res := <-tr.results
+	if res.OK || !strings.Contains(res.Error, "only an agent reserved for device pools") || res.Fault != store.FaultConfig {
+		t.Fatalf("result %+v, want a configuration refusal", res)
+	}
+	be.mu.Lock()
+	defer be.mu.Unlock()
+	if len(be.created) != 0 {
+		t.Fatal("a device runner was created on an ordinary agent")
+	}
+}

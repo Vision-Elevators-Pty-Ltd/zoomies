@@ -1772,6 +1772,13 @@ func (a *Agent) handleCreate(ctx context.Context, task Task, release func()) {
 	if spec.RunnerID == "" {
 		spec.RunnerID = task.RunnerID
 	}
+	if !a.opts.DevicesOnly && len(spec.Devices) > 0 {
+		// Device pools go only to agents reserved for them: this one's daemon
+		// runs general jobs, and must not be the one given a host device.
+		release()
+		a.reportFailure(ctx, task, fmt.Sprintf("pool %q maps %s, and only an agent reserved for device pools (agent.devices_only) takes such a runner; nothing was created", spec.PoolName, strings.Join(spec.Devices, ", ")), store.FaultConfig)
+		return
+	}
 	if a.opts.DevicesOnly && len(spec.Devices) == 0 {
 		// The controller places no such runner here (FeatureDevicesOnly); one
 		// that arrives anyway, from an older controller or a race with a

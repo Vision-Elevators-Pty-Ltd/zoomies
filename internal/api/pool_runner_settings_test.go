@@ -185,6 +185,7 @@ func TestAPoolMapsKVMOnlyOnKVMHosts(t *testing.T) {
 	cookie := h.session(u)
 
 	body := poolBody(inst.ID)
+	body["runner_group"] = "emulator"
 	body["runner_settings"] = map[string]any{"devices": []string{"/dev/kvm"}}
 	h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body}).mustNotSucceed(t, "kvm without the kvm=ok selector")
 
@@ -241,6 +242,7 @@ func TestANoDeviceExportClearsAnImportedPoolsDevices(t *testing.T) {
 			u, _ := h.user("operator", store.RoleOperator)
 			cookie := h.session(u)
 			body := poolBody(inst.ID)
+			body["runner_group"] = "emulator"
 			body["host_selector"] = map[string]string{"kvm": "ok"}
 			body["runner_settings"] = map[string]any{"devices": []string{"/dev/kvm"}}
 			res := h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body})
@@ -285,6 +287,7 @@ func TestChangingAPoolsDevicesIsStamped(t *testing.T) {
 	u, _ := h.user("operator", store.RoleOperator)
 	cookie := h.session(u)
 	body := poolBody(inst.ID)
+	body["runner_group"] = "emulator"
 	body["host_selector"] = map[string]string{"kvm": "ok"}
 	res := h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body})
 	res.mustStatus(t, http.StatusCreated, "create")
@@ -332,6 +335,7 @@ func TestADevicePoolMustUseDockerModeNone(t *testing.T) {
 		body := poolBody(inst.ID)
 		body["name"] = "emulator-" + mode
 		body["docker_mode"] = mode
+		body["runner_group"] = "emulator"
 		body["host_selector"] = map[string]string{"kvm": "ok"}
 		body["runner_settings"] = map[string]any{"devices": []string{"/dev/kvm"}}
 		res := h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body})
@@ -339,5 +343,32 @@ func TestADevicePoolMustUseDockerModeNone(t *testing.T) {
 		if !strings.Contains(string(res.body), "docker_mode none") {
 			t.Fatalf("%s: the refusal does not say why: %s", mode, res.body)
 		}
+	}
+}
+
+// Review r2 of #23, finding 1: a device pool must name a runner group of its
+// own (not Default, not Zoomies' shared group) and have a label of its own,
+// so GitHub and the scheduler can keep ordinary jobs off it.
+func TestADevicePoolNeedsItsOwnGroupAndLabel(t *testing.T) {
+	h := newHarness(t)
+	inst := h.installation()
+	u, _ := h.user("operator", store.RoleOperator)
+	cookie := h.session(u)
+	for name, mut := range map[string]func(map[string]any){
+		"no group":          func(b map[string]any) { delete(b, "runner_group") },
+		"the Default group": func(b map[string]any) { b["runner_group"] = "Default" },
+		"the shared group":  func(b map[string]any) { b["runner_group"] = controller.ManagedRunnerGroupName },
+		"no label of its own": func(b map[string]any) {
+			b["labels"] = []string{"self-hosted", "linux", "x64"}
+		},
+		"not ephemeral": func(b map[string]any) { b["ephemeral"] = false },
+	} {
+		body := poolBody(inst.ID)
+		body["name"] = "emulator"
+		body["runner_group"] = "emulator"
+		body["host_selector"] = map[string]string{"kvm": "ok"}
+		body["runner_settings"] = map[string]any{"devices": []string{"/dev/kvm"}}
+		mut(body)
+		h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body}).mustNotSucceed(t, name)
 	}
 }

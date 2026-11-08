@@ -2516,15 +2516,17 @@ func HostSelects(h *store.Host, p *store.Pool) bool {
 	return true
 }
 
-// HostTakesDevicesOf is the device half of HostSelects: a pool that maps host
-// devices goes only to a host whose agent maps them (store.FeatureDevices; an
-// older agent would ignore the field and start a runner without the device),
-// and a host whose agent is reserved for device pools
-// (store.FeatureDevicesOnly) takes no other pool. A pool that maps nothing on
-// a host that is not reserved is untouched by this.
+// HostTakesDevicesOf is the device half of HostSelects. A pool that maps host
+// devices goes only to a host that is reserved for device pools
+// (store.FeatureDevicesOnly, which the controller keeps once a host has said
+// it) and whose agent maps devices now (store.FeatureDevices; an older agent
+// would ignore the field and start a runner without the device). An ordinary
+// agent never takes one, whatever its labels. A reserved host takes no other
+// pool, even once an older agent there stops saying so. A pool that maps
+// nothing on a host that is not reserved is untouched by this.
 func HostTakesDevicesOf(h *store.Host, p *store.Pool) bool {
 	if p.MapsDevices() {
-		return h.Supports(store.FeatureDevices)
+		return h.Supports(store.FeatureDevices) && h.Supports(store.FeatureDevicesOnly)
 	}
 	return !h.Supports(store.FeatureDevicesOnly)
 }
@@ -2600,7 +2602,7 @@ func (hs *hostSet) why(p *store.Pool) blockage {
 			}
 		case !HostIsPlatform(h, p):
 			platform++
-		case p.MapsDevices() && !h.Supports(store.FeatureDevices):
+		case p.MapsDevices() && !(h.Supports(store.FeatureDevices) && h.Supports(store.FeatureDevicesOnly)):
 			noDevices++
 		case !p.MapsDevices() && h.Supports(store.FeatureDevicesOnly):
 			reserved++
@@ -2717,7 +2719,7 @@ func (hs *hostSet) why(p *store.Pool) blockage {
 	add(incompatible, "running an agent this controller cannot talk to")
 	add(backend, "without the "+string(p.Backend)+" backend")
 	add(platform, "not "+p.Platform.Describe())
-	add(noDevices, "whose agent cannot map the pool's devices (upgrade it)")
+	add(noDevices, "whose agent is not a current one reserved for device pools (agent.devices_only)")
 	add(reserved, "reserved for pools that map devices")
 	add(selector, "not matching the pool's host selector")
 	add(profile, "excluded by their runner profile")

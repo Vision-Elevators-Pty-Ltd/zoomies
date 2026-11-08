@@ -876,6 +876,39 @@ type RunnerSettings struct {
 	DevicesChangedAt *time.Time `json:"devices_changed_at,omitempty"`
 }
 
+// DevicePoolProblems is what else a pool that maps devices must be, beyond
+// DeviceProblems, so that only the jobs meant for it reach its runners: ephemeral (a
+// runner that serves one job, registered by a JIT configuration bound to a
+// runner group); with a label of its own a job must ask for (the scheduler
+// places only jobs asking for every such label); and in a named organisation
+// runner group, not Default, which the operator restricts on GitHub to the
+// workflows that may use it (the controller checks that before it registers a
+// runner). targetType is the pool's installation's. Empty for a pool that maps
+// nothing.
+func DevicePoolProblems(p *Pool, targetType TargetType) []string {
+	if !p.MapsDevices() {
+		return nil
+	}
+	var out []string
+	if !p.Ephemeral {
+		out = append(out, "a pool that maps devices must be ephemeral, so each runner serves one job and is registered in its runner group by a JIT configuration")
+	}
+	own := false
+	for _, l := range NormalizeLabels(p.Labels) {
+		own = own || !ImplicitLabels[l]
+	}
+	if !own {
+		out = append(out, "a pool that maps devices needs a label of its own (such as sa-ci-emulator) that only its jobs ask for")
+	}
+	if targetType != TargetOrg {
+		out = append(out, "a pool that maps devices must belong to an organisation installation, whose runner groups can be restricted to selected workflows")
+	}
+	if g := strings.TrimSpace(p.RunnerGroup); g == "" || strings.EqualFold(g, "default") {
+		out = append(out, "a pool that maps devices must name its own runner group (runner_group), restricted on GitHub to the workflows that may use the device")
+	}
+	return out
+}
+
 // DevicesChanged reports whether two device lists differ as sets.
 func DevicesChanged(before, after []string) bool {
 	a, b := slices.Clone(before), slices.Clone(after)
@@ -900,6 +933,21 @@ const FeatureDevices = "devices"
 // refuses any other create, so a broad selector such as pool: pr can never
 // put a general job on the daemon that can open /dev/kvm.
 const FeatureDevicesOnly = "devices-only"
+
+// KeepReservation is the features a host is recorded with when its agent
+// reports reported: those, and FeatureDevicesOnly where the host had it
+// before. A host is reserved for device pools because of what its daemon can
+// open, not because of what its agent process says this minute: an agent
+// rolled back to a release that predates the reservation (or started without
+// it) still runs beside a daemon with the device's group mapped, so the host
+// stays reserved, takes no general pool, and, without FeatureDevices, no
+// device pool either. Only retiring the host lifts it.
+func KeepReservation(before, reported []string) []string {
+	if slices.Contains(before, FeatureDevicesOnly) && !slices.Contains(reported, FeatureDevicesOnly) {
+		return append(slices.Clone(reported), FeatureDevicesOnly)
+	}
+	return reported
+}
 
 // MapsDevices reports whether the pool maps host devices into its runners.
 func (p *Pool) MapsDevices() bool { return p != nil && len(p.RunnerSettings.Devices) > 0 }

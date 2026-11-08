@@ -786,27 +786,48 @@ an Android emulator. It is not a fleet setting and has no default; a pool that
 does not set it is unchanged. The sidecar of a docker-in-docker pool is not
 given the device.
 
-- **Placement.** A pool that maps `/dev/kvm` must select `kvm: ok` in its
-  `host_selector` and use `docker_mode: none`, and the API refuses it
-  otherwise; the agent refuses such a runner too. A privileged docker-in-docker
-  sidecar is given every host device whatever the pool maps, and a host socket
-  lets a job ask the daemon for any, so neither may carry a device. The pool is
-  placed only on hosts labelled `kvm=ok` whose agent advertises the `devices`
-  feature: an agent older than the option would ignore it and start a runner
-  without the device, so it is never given the pool.
-- **Reserved agents.** An agent started with `agent.devices_only: true`
-  (`ZOOMIES_AGENT_DEVICES_ONLY=true`) is given runners of pools that map
-  devices and nothing else, and refuses any other create itself. That is how a
-  daemon that can open `/dev/kvm` is kept from general jobs whose selector
-  (such as `pool: pr`) also matches its host.
+A device pool runs only the jobs meant for it, only on agents reserved for it.
+Each of these is enforced, and refused where it is not met:
+
+- **The pool.** It must be ephemeral, use `docker_mode: none` (a privileged
+  docker-in-docker sidecar is given every host device whatever the pool maps,
+  and a host socket lets a job ask the daemon for any), select `kvm: ok` in
+  its `host_selector`, have a label of its own (such as `sa-ci-emulator`), and
+  name its own runner group (`runner_group`), neither Default nor Zoomies'
+  shared group, in an organisation installation. The API refuses it
+  otherwise; the agent refuses a device runner on a non-`none` mode too.
+- **The jobs.** Zoomies places a job on a device pool only if the job asks for
+  every label of the pool's own, not just `self-hosted, linux, x64`, which match
+  any runner. GitHub, though, offers a registered runner any queued job its
+  labels satisfy, and every ephemeral runner carries `self-hosted, linux, x64`.
+  So the pool's runner group must be restricted on GitHub to selected
+  workflows (the emulator workflows only) and must not serve public
+  repositories. The controller checks the group before it registers each
+  runner, and fails the runner, saying why, where it is not. Keep the
+  emulator jobs in workflows of their own: every job of a selected workflow
+  can be offered the group's runners.
+- **The agents.** A device pool is placed only on a host whose agent is
+  reserved for device pools (`agent.devices_only: true` in its YAML), and
+  maps devices (the `devices` feature), and is labelled `kvm=ok`. An ordinary
+  agent never takes one, whatever its labels, and refuses such a runner
+  itself. A reserved agent takes no other pool, and refuses any other runner.
+  A host stays reserved once its agent has said so: an agent later rolled back
+  to a release that does not say so (or started with the setting only in its
+  environment, which an older release ignores) leaves the host reserved and
+  without the `devices` feature, so it takes no pool at all. Only retiring the
+  host lifts the reservation. Set `devices_only` in the YAML, not the
+  environment: an older release refuses to start on the unknown key, which is
+  the safe failure.
 - **Changes reach existing runners.** A container keeps the devices it was
   created with. When a pool's `devices` change (by edit or import), its
   runners made before the change are replaced as soon as they are not running
-  a job, and a create still queued for a host is not delivered. Removing
-  `kvm=ok` from a host, or replacing its agent with one that does not map
-  devices, does the same for the device runners on that host. A busy runner
-  finishes its job first. An export always writes `devices`, `[]` for a pool
-  that maps none, so importing it clears a target's devices.
+  a job. Every create is checked again when its host polls for it: a create
+  still queued from before the change is not delivered, whichever way the
+  devices changed, nor one for a host since reserved. Removing `kvm=ok` from a
+  host, or its agent no longer mapping devices, does the same for the device
+  runners on that host. A busy runner finishes its job first. An export always
+  writes `devices`, `[]` for a pool that maps none, so importing it clears a
+  target's devices.
 - **The agent's check is a prediction.** Before it pulls or creates anything,
   the agent reads each device's mode and group and the daemon's group map, and
   refuses the runner, with an error saying what to fix, where the device is
@@ -815,32 +836,42 @@ given the device.
   an LSM rule, the daemon's device cgroup, a runtime that drops supplementary
   groups (runc does where `setgroups` is denied) or a KVM module that cannot
   run guests all pass it. Rootless Podman has no group map where the agent
-  looks, so under it only a device every user may open passes. Certify a host
-  with the smoke test below, never by the check passing.
+  looks, so under it only a device every user may open passes. A host is
+  certified by the smoke test below, never by the check passing.
 - **Who can open it.** On the hosts, `/dev/kvm` is `crw-rw---- root kvm`.
-  - Under a daemon that runs as root, the runner is given the device's group
-    as a supplementary group, like the host socket's.
-  - Under rootless Docker, which the agents use, putting the agent's user in
-    the `kvm` group is not enough. runc sets the container's own groups, so
-    the host user's supplementary groups do not reach the runner: measured on
-    ci-nl-02 on 8 November 2026, a container had only its own group, and
-    `/dev/kvm` showed as `65534:65534`.
-  - For rootless Docker, map the kvm group into the namespace of a daemon used
-    only for device pools: add an `/etc/subgid` entry `<user>:<kvm gid>:1` for
-    that daemon's user, then restart that user's rootless docker, which ends
-    its running runners. The agent reads the daemon's group map (rootlesskit's
-    `child_pid`) and gives the runner the group `kvm` is mapped to. The grant
-    is authority over host gid `kvm` for every container of that daemon, so
-    give it to a dedicated user whose agent is reserved (`agent.devices_only`),
-    not to a daemon that runs general jobs.
-  - A udev rule making `/dev/kvm` `0666` also works, but lets every local
-    account, and every privileged sidecar on the machine, reach KVM. Do not use
-    it on shared CI hosts.
-- **Smoke test.** As the reserved daemon's user, through that daemon:
-  `docker run --rm --device /dev/kvm --group-add <mapped gid> <runner image>
-  sh -c 'id; ls -ln /dev/kvm; test -r /dev/kvm && test -w /dev/kvm'`, then
-  an emulator job (or `KVM_GET_API_VERSION`) on the pool. Certify the host
-  only once this passes, and again after a reboot.
+  Under a daemon that runs as root, the runner is given the device's group as
+  a supplementary group. Under rootless Docker, which the agents use, putting
+  the user in the `kvm` group is not enough: runc sets the container's own
+  groups (measured on ci-nl-02 on 8 November 2026, a container had only its
+  own group, and `/dev/kvm` showed as `65534:65534`). The kvm gid must be
+  mapped into the namespace of a daemon used only by the reserved agent; the
+  agent reads the live map (rootlesskit's `child_pid`) and gives the runner
+  the group `kvm` is mapped to. The grant is authority over host gid `kvm` for
+  every container of that daemon, so it goes to a dedicated user, never to a
+  daemon that runs general jobs. A udev rule making `/dev/kvm` `0666` would
+  also work, but lets every local account and every privileged sidecar reach
+  KVM; do not use it on shared CI hosts.
+
+The host files are in `deploy/emulator-host/`, each tested:
+
+- `runner-emu-subids.sh` creates the `runner-emu` user, keeps whatever
+  subordinate range `useradd` allocated (or allocates one above every other),
+  adds the kvm gid alone, and refuses files where runner-emu has a second
+  range, a range overlapping another user's, or another user holds the kvm
+  gid.
+- `kvm-smoke.sh USER IMAGE` runs, as that user through that user's daemon,
+  `docker run --device /dev/kvm --group-add <gid from the live map>
+  --entrypoint /bin/sh IMAGE -c <probe>`. The entrypoint has to be overridden:
+  the runner image's own entrypoint ignores a command and exits 64 without
+  runner credentials. It passes only when the probe ran as the image's user
+  with that group, opened `/dev/kvm` read-write and got
+  `KVM_GET_API_VERSION` 12. `kvm-smoke.sh USER IMAGE --expect-deny` is the
+  negative control for a general daemon: the kvm gid absent from its map, the
+  probe run, and the open refused with `EACCES`.
+- `zoomies-agent-emulator.service` is the reserved agent's complete unit, with
+  its own config (`/etc/zoomies-emu`) and state (`/var/lib/zoomies-emu`) and no
+  `StateDirectory`, `ConfigurationDirectory`, `EnvironmentFile` or extra groups
+  shared with the host's other agents.
 
 ### Keeping the work folder in memory
 

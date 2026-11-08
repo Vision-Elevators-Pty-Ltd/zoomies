@@ -809,6 +809,15 @@ func (c *Controller) mintCredentials(ctx context.Context, inst *store.Installati
 		if c.githubHeld(inst.ID, c.Now()) {
 			return backend.Credentials{}, 0, errRegistrationHeld
 		}
+		if pool.MapsDevices() {
+			resolved, _ := c.clients.runnerGroup(inst, pool.RunnerGroup)
+			if group == 0 {
+				resolved = github.RunnerGroup{}
+			}
+			if why := deviceGroupRefusal(inst, pool, resolved, unresolved); why != "" {
+				return backend.Credentials{}, 0, fmt.Errorf("%w: %s", errDeviceGroup, why)
+			}
+		}
 		jit, err := client.CreateJITConfig(ctx, github.JITRequest{
 			Name:          name,
 			Labels:        pool.Labels,

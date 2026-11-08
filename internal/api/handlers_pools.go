@@ -706,7 +706,14 @@ func (s *Server) validatePool(ctx context.Context, p *store.Pool, existingID str
 
 	if p.InstallationID == "" {
 		add("installation_id", "a pool has to belong to a GitHub App installation; connect one on the Installations page first")
-	} else if _, err := s.ctrl.Store().GetInstallation(ctx, p.InstallationID); err != nil {
+	} else if inst, err := s.ctrl.Store().GetInstallation(ctx, p.InstallationID); err == nil {
+		for _, problem := range store.DevicePoolProblems(p, inst.TargetType) {
+			add("runner_settings.devices", problem)
+		}
+		if p.MapsDevices() && strings.EqualFold(strings.TrimSpace(p.RunnerGroup), controller.ManagedRunnerGroupName) {
+			add("runner_settings.devices", "a pool that maps devices cannot use "+controller.ManagedRunnerGroupName+", which every pool shares; name a group of its own, restricted on GitHub to the workflows that may use the device")
+		}
+	} else {
 		if errors.Is(err, store.ErrNotFound) {
 			add("installation_id", fmt.Sprintf("there is no installation %s; it may have been removed since this form was opened", p.InstallationID))
 		} else {

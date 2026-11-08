@@ -230,6 +230,23 @@ func (cc *clientCache) runnerGroupID(ctx context.Context, inst *store.Installati
 	return found.ID, "", found.PublicRepositoryAccessKnown && !found.AllowsPublicRepositories
 }
 
+// runnerGroup is the group runnerGroupID last resolved name to for inst, from
+// the cache it fills, and whether there was one.
+func (cc *clientCache) runnerGroup(inst *store.Installation, name string) (github.RunnerGroup, bool) {
+	lookup := strings.ToLower(strings.TrimSpace(name))
+	if lookup == "" {
+		lookup = "default"
+	}
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	e := cc.entries[inst.ID]
+	if e == nil || e.groups == nil {
+		return github.RunnerGroup{}, false
+	}
+	g, ok := e.groups[lookup]
+	return g, ok
+}
+
 // probeLoop re-checks every installation's credentials on an interval, so a
 // revoked App or a rotated key shows up on the Installations page instead of
 // as runners that quietly stop being created.

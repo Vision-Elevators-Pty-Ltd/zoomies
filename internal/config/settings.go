@@ -541,7 +541,7 @@ var registry = buildRegistry([]Setting{
 	},
 	{
 		Key: "agent.devices_only", Label: "Only pools that map devices", Env: "ZOOMIES_AGENT_DEVICES_ONLY", Kind: KindBool, Scope: ScopeLocal,
-		Summary: "Reserve this agent for pools that map host devices (runner_settings.devices): no other pool is placed on it, and it refuses any other runner. For an agent whose daemon alone can open a device, such as a rootless daemon with the kvm group mapped. It is configured on that agent's own host.",
+		Summary: "Reserve this agent for pools that map host devices (runner_settings.devices): only it takes them, no other pool is placed on it, and it refuses any other runner. The host stays reserved even if a later agent stops saying so. Set it in the YAML, which an older release refuses to start with. It is configured on that agent's own host.",
 	},
 
 	// ---------------------------------------------------------------------

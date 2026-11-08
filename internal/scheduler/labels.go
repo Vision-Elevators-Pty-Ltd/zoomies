@@ -44,8 +44,43 @@ func Matches(poolLabels, jobLabels []string) bool {
 // for self-hosted or linux must find those among them: GitHub would never
 // offer that job to such a runner, and a runner started for it would sit
 // idle while the job waited.
+//
+// A pool that maps host devices (runner_settings.devices) is stricter: it
+// takes only a job that asks for every label of its own that is not an
+// implicit one (sa-ci-emulator, say), so a job written runs-on: [self-hosted,
+// linux, x64] is never placed on the emulator pool even where nothing else
+// could run it. GitHub's side of the same boundary is the pool's runner group,
+// restricted to the emulator workflows (controller.deviceGroupRefusal).
 func PoolMatches(p *store.Pool, jobLabels []string) bool {
-	return matches(store.NormalizeLabels(p.Labels), labelsOf(store.NormalizeLabels(jobLabels)), !p.NoDefaultLabels)
+	return poolTakes(p, store.NormalizeLabels(p.Labels), labelsOf(store.NormalizeLabels(jobLabels)))
+}
+
+// poolTakes is PoolMatches over a pool's normalised labels and a job's
+// classified ones: the one question every place that sets a job against a
+// pool asks, so that a device pool's rule cannot be skipped by any of them.
+func poolTakes(p *store.Pool, labels []string, job jobLabels) bool {
+	if p.MapsDevices() && !asksForEveryOwnLabel(labels, job.names) {
+		return false
+	}
+	return matches(labels, job, !p.NoDefaultLabels)
+}
+
+// asksForEveryOwnLabel reports whether a job's labels include every label of
+// the pool's that is not one every runner advertises, and whether the pool has
+// any such label at all: a device pool without one would be asked for by any
+// job, and takes none.
+func asksForEveryOwnLabel(pool, job []string) bool {
+	own := 0
+	for _, l := range pool {
+		if store.ImplicitLabels[l] {
+			continue
+		}
+		own++
+		if !slices.Contains(job, l) {
+			return false
+		}
+	}
+	return own > 0
 }
 
 // jobLabels is a job's normalised labels with the one question every
@@ -252,7 +287,7 @@ func bestOf(pools []*store.Pool, prepared [][]string, j *store.Job, job jobLabel
 		} else {
 			labels = store.NormalizeLabels(p.Labels)
 		}
-		if !matches(labels, job, !p.NoDefaultLabels) {
+		if !poolTakes(p, labels, job) {
 			continue
 		}
 		if refusalBeforeLabels(p, j) != "" {

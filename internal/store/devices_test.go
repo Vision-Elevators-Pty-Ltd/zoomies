@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -92,5 +93,75 @@ func TestAChangeOfDevicesIsStampedByTheWrite(t *testing.T) {
 	again, _ := s.GetPool(ctx, p.ID)
 	if again.RunnerSettings.DevicesChangedAt == nil || !again.RunnerSettings.DevicesChangedAt.Equal(stamped) {
 		t.Fatalf("a later write moved the stamp to %v", again.RunnerSettings.DevicesChangedAt)
+	}
+}
+
+// Review r2 of #23, finding 2: a host reserved for device pools stays
+// reserved whatever its agent reports later; only a host that never said so
+// is free of it.
+func TestAReservationOutlivesTheAgentThatReportedIt(t *testing.T) {
+	reserved := []string{"elastic-cpu", FeatureDevices, FeatureDevicesOnly}
+	if got := KeepReservation(reserved, []string{"elastic-cpu"}); !slices.Contains(got, FeatureDevicesOnly) || slices.Contains(got, FeatureDevices) {
+		t.Fatalf("an older agent's report made the host %v", got)
+	}
+	if got := KeepReservation([]string{"elastic-cpu"}, []string{"elastic-cpu", FeatureDevices}); slices.Contains(got, FeatureDevicesOnly) {
+		t.Fatalf("an ordinary host became reserved: %v", got)
+	}
+}
+
+// Review r2 of #23, finding 1: a pool that maps devices must be ephemeral,
+// have a label of its own, belong to an organisation and name a runner group
+// other than Default.
+func TestADevicePoolIsBoundToItsOwnJobs(t *testing.T) {
+	good := func() *Pool {
+		return &Pool{Labels: StringSlice{"self-hosted", "linux", "x64", "sa-ci-emulator"}, Ephemeral: true,
+			RunnerGroup: "emulator", RunnerSettings: RunnerSettings{Devices: []string{"/dev/kvm"}}}
+	}
+	if got := DevicePoolProblems(good(), TargetOrg); len(got) != 0 {
+		t.Fatalf("the emulator pool: %v", got)
+	}
+	for name, tc := range map[string]struct {
+		mut    func(*Pool)
+		target TargetType
+		want   string
+	}{
+		"not ephemeral": {func(p *Pool) { p.Ephemeral = false }, TargetOrg, "ephemeral"},
+		"no own label":  {func(p *Pool) { p.Labels = StringSlice{"self-hosted", "linux", "x64"} }, TargetOrg, "label of its own"},
+		"default group": {func(p *Pool) { p.RunnerGroup = "Default" }, TargetOrg, "runner group"},
+		"no group":      {func(p *Pool) { p.RunnerGroup = "" }, TargetOrg, "runner group"},
+		"a repository":  {func(*Pool) {}, TargetRepo, "organisation"},
+	} {
+		p := good()
+		tc.mut(p)
+		if got := strings.Join(DevicePoolProblems(p, tc.target), "; "); !strings.Contains(got, tc.want) {
+			t.Errorf("%s: problems %q, want %q", name, got, tc.want)
+		}
+	}
+	general := good()
+	general.RunnerSettings.Devices = nil
+	general.Ephemeral, general.RunnerGroup = false, ""
+	if got := DevicePoolProblems(general, TargetRepo); len(got) != 0 {
+		t.Fatalf("a pool that maps nothing: %v", got)
+	}
+}
+
+// Review r2 of #23, finding 1: the pools a claim reads keep their devices, so
+// a claim applies the device pool's label rule as the scheduler does.
+func TestAClaimSeesAPoolsDevices(t *testing.T) {
+	s := newTestStore(t)
+	_, p, _ := seedPool(t, s)
+	p.RunnerSettings.Devices = []string{"/dev/kvm"}
+	if err := s.UpdatePool(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	pools, err := s.ListPoolsForClaim(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pools) != 1 || !pools[0].MapsDevices() {
+		t.Fatalf("the claim's pools: %+v", pools)
+	}
+	if v := ClaimView(p); !v.MapsDevices() {
+		t.Fatal("ClaimView dropped the pool's devices")
 	}
 }

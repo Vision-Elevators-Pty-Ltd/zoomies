@@ -266,6 +266,19 @@ func (f *FakeGitHub) SetRunnerGroupPublicAccess(name string, allowed bool) {
 	}
 }
 
+// SetRunnerGroupRestrictedToWorkflows changes whether GitHub reports a group
+// as restricted to selected workflows, which a pool that maps devices needs.
+func (f *FakeGitHub) SetRunnerGroupRestrictedToWorkflows(name string, restricted bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.groups {
+		if strings.EqualFold(f.groups[i].Name, name) {
+			f.groups[i].RestrictedToWorkflows = restricted
+			return
+		}
+	}
+}
+
 // AddRunner registers a runner that Zoomies did not create, which is how a
 // test simulates a registration the controller has lost track of.
 func (f *FakeGitHub) AddRunner(name string, labels []string) Runner {

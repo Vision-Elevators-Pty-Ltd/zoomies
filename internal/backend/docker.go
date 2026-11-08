@@ -592,6 +592,9 @@ type containerOptions struct {
 	// SharedSlice is the systemd slice a shared-limit docker-in-docker pair is
 	// created under, both halves of it; empty for every other runner.
 	SharedSlice string
+	// DeviceGroups are the supplementary groups, as the daemon names them,
+	// the runner needs to open the spec's devices (devices.go).
+	DeviceGroups []string
 }
 
 // extraCABind is the read-only mount for the extra CA bundle. The Podman
@@ -743,6 +746,8 @@ func buildRunnerConfig(spec Spec, fl flavor, o containerOptions) ContainerCreate
 		hc.VolumesFrom = []string{o.VolumesFrom}
 	}
 	hc.ShmSize = runnerShmBytes(spec.ShmSizeMB, res.MemoryMB)
+	hc.Devices = deviceMappings(spec.Devices)
+	hc.GroupAdd = append(hc.GroupAdd, o.DeviceGroups...)
 
 	if o.HostSocket != "" {
 		// No relabel suffix here. ":z" relabels the *source*, and the source
@@ -1305,6 +1310,12 @@ func (b *DockerBackend) CreateWithResult(ctx context.Context, spec Spec) (result
 	if spec.DockerMode == store.DockerDinD && !b.fl.supportsDinD {
 		return CreateResult{}, fmt.Errorf("backend: the %s backend cannot run docker-in-docker", b.fl.kind)
 	}
+	// Before anything is pulled or removed: a host that cannot give the
+	// runner its devices says so at once, and changes nothing.
+	devices, err := b.devicesOnThisHost(spec)
+	if err != nil {
+		return CreateResult{}, err
+	}
 
 	name := containerName(spec.Name)
 	if err := b.removeOwnedForCreate(ctx, spec, false); err != nil {
@@ -1327,7 +1338,8 @@ func (b *DockerBackend) CreateWithResult(ctx context.Context, spec Spec) (result
 	createStarted := time.Now()
 
 	dindImage := b.sidecarImage(spec)
-	opts := containerOptions{Now: time.Now(), DinDImage: dindImage, ProxyEnv: inheritedProxyEnv(os.LookupEnv, spec.Env), ExtraCAFile: b.extraCA}
+	opts := containerOptions{Now: time.Now(), DinDImage: dindImage, ProxyEnv: inheritedProxyEnv(os.LookupEnv, spec.Env), ExtraCAFile: b.extraCA,
+		DeviceGroups: devices.groups}
 	network := firstNonEmpty(strings.TrimSpace(spec.Network), b.network)
 	if network != "" {
 		if err := b.ensureNetwork(ctx, network); err != nil {

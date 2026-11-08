@@ -736,7 +736,13 @@ type Agent struct {
 	// loopback. Off by default: the agent token and the runner registration
 	// credentials in every create task would otherwise cross the network in
 	// the clear.
-	AllowInsecureHTTP bool          `yaml:"allow_insecure_http"`
+	AllowInsecureHTTP bool `yaml:"allow_insecure_http"`
+	// DevicesOnly reserves this agent for pools that map host devices
+	// (runner_settings.devices): it advertises agent.FeatureDevicesOnly, the
+	// scheduler gives it no other pool, and it refuses any other create. For
+	// an agent whose daemon holds device access no other daemon on the
+	// machine has, such as a rootless daemon with the kvm group mapped.
+	DevicesOnly       bool          `yaml:"devices_only"`
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval"`
 	// Network is an optional pre-existing container network to attach runners to.
 	Network string `yaml:"network"`

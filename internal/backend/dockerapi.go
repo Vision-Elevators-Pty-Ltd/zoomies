@@ -505,10 +505,19 @@ type HostConfig struct {
 	ShmSize        int64             `json:"ShmSize,omitempty"`
 	Tmpfs          map[string]string `json:"Tmpfs,omitempty"`
 	Mounts         []Mount           `json:"Mounts,omitempty"`
+	Devices        []DeviceMapping   `json:"Devices,omitempty"`
 	RestartPolicy  RestartPolicy     `json:"RestartPolicy"`
 	// CgroupParent is the slice a shared-limit docker-in-docker pair is
 	// created under (see sharedlimit.go). Empty leaves the daemon's default.
 	CgroupParent string `json:"CgroupParent,omitempty"`
+}
+
+// DeviceMapping is one entry of HostConfig.Devices: a host device node made
+// available inside the container.
+type DeviceMapping struct {
+	PathOnHost        string `json:"PathOnHost"`
+	PathInContainer   string `json:"PathInContainer"`
+	CgroupPermissions string `json:"CgroupPermissions"`
 }
 
 // Mount is one entry of HostConfig.Mounts. The agent uses it for one thing: an

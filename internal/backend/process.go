@@ -258,6 +258,9 @@ func (b *ProcessBackend) CreateWithResult(ctx context.Context, spec Spec) (Creat
 	if err := spec.Validate(); err != nil {
 		return CreateResult{}, err
 	}
+	if len(spec.Devices) > 0 {
+		return CreateResult{}, fmt.Errorf("backend: pool %q maps devices into its runners, and the process backend runs no container to map them into", spec.PoolName)
+	}
 	if spec.DockerMode == store.DockerDinD {
 		return CreateResult{}, fmt.Errorf("backend: pool %q asks for docker-in-docker, which the process backend cannot provide; move the pool to the docker backend", spec.PoolName)
 	}

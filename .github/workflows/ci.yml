@@ -196,6 +196,10 @@ jobs:
               # lints them, and the rest shard holds the tests that read
               # deploy/.
               deploy/instapods/*) installer=true; rest=true ;;
+              # The KVM hosts' runner-emu scripts and unit go into no image:
+              # they are run by hand on a host. The installer job lints the
+              # scripts, and the rest shard runs deploy/emulator-host's tests.
+              deploy/emulator-host/*) installer=true; rest=true ;;
               # Workflows for the demo organisation to copy. Nothing here runs
               # them; internal/docs reads them like any other prose.
               deploy/demo-org/*) docs=true ;;
@@ -1341,6 +1345,11 @@ jobs:
           dash -n test/install/install-check.sh
           shellcheck -s sh test/install/install-check.sh
           shellcheck deploy/runner-entrypoint.sh
+          # The runner-emu host scripts, run by hand as root on a KVM host.
+          dash -n deploy/emulator-host/kvm-smoke.sh
+          shellcheck -s sh deploy/emulator-host/kvm-smoke.sh
+          dash -n deploy/emulator-host/runner-emu-subids.sh
+          shellcheck -s sh deploy/emulator-host/runner-emu-subids.sh
           dash -n test/upgrade/upgrade-check.sh
           shellcheck -s sh test/upgrade/upgrade-check.sh
           dash -n test/upgrade/helper-check.sh

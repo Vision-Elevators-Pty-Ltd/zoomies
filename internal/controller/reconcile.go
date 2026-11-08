@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"time"
 
@@ -666,6 +667,7 @@ func (c *Controller) finishCreateRunner(ctx context.Context, inst *store.Install
 		DinDImage:     pool.DinDImage,
 		RunAsRoot:     pool.RunAsRoot,
 		ShmSizeMB:     shmSizeMB(c.cfg().Runners, pool),
+		Devices:       slices.Clone(pool.RunnerSettings.Devices),
 		Network:       c.cfg().Agent.Network,
 		RunnerVersion: r.RunnerVersion,
 	}
@@ -806,6 +808,19 @@ func (c *Controller) mintCredentials(ctx context.Context, inst *store.Installati
 		c.noteRunnerGroup(pool, pool.RunnerGroup, unresolved, publicBlocked)
 		if c.githubHeld(inst.ID, c.Now()) {
 			return backend.Credentials{}, 0, errRegistrationHeld
+		}
+		if pool.MapsDevices() {
+			// The group's policy as GitHub has it now, for the very group the
+			// runner is about to be registered in: a cached read would let a
+			// group whose workflow restriction was lifted since keep taking
+			// device runners, which GitHub would then offer ordinary jobs.
+			current, gerr := c.clients.currentRunnerGroup(ctx, inst, client, group)
+			if gerr != nil {
+				return backend.Credentials{}, 0, fmt.Errorf("%w: GitHub would not say what runner group %s allows now: %w", errDeviceGroup, pool.RunnerGroup, gerr)
+			}
+			if why := deviceGroupRefusal(inst, pool, current, unresolved); why != "" {
+				return backend.Credentials{}, 0, fmt.Errorf("%w: %s", errDeviceGroup, why)
+			}
 		}
 		jit, err := client.CreateJITConfig(ctx, github.JITRequest{
 			Name:          name,

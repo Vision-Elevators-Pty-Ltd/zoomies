@@ -7764,6 +7764,18 @@ export interface components {
              * @example 2048
              */
             shm_size_mb?: number | null;
+            /**
+             * @description Host devices mapped into this pool's runner containers at the same path (not a docker-in-docker sidecar), for jobs such as an Android emulator that need `/dev/kvm`. Only `/dev/kvm`, only on the docker and podman backends, only with `docker_mode: none` (a privileged docker-in-docker sidecar is given every host device, and a host socket can ask for one), and only on an ephemeral pool whose `host_selector` selects `kvm: ok`, with a label of its own and its own runner group in an organisation (GitHub must restrict the group to selected workflows; the controller checks before each registration). Only jobs asking for every label of the pool's own are placed on it, and only on hosts labelled `kvm=ok` whose agent is reserved for device pools (`agent.devices_only`) and advertises the `devices` feature. The agent predicts from the device's metadata whether the runner can open it and refuses one it cannot give, saying why; that check does not open the device, so a host is certified by a smoke test. No fleet default: absent keeps the pool's, `null` or `[]` maps none. Changing the list replaces the pool's runners made before the change once they are not running a job, and a create queued before it is not delivered; so does removing `kvm=ok` from a host.
+             * @example [
+             *       "/dev/kvm"
+             *     ]
+             */
+            devices?: "/dev/kvm"[] | null;
+            /**
+             * Format: date-time
+             * @description When `devices` last changed. Runners of the pool created before it are replaced as soon as they are not running a job. Set by the server; not accepted as input.
+             */
+            readonly devices_changed_at?: string | null;
         };
         /** @description One host's room for a pool: what it promises, what the machine can back at that pool's size, and what one runner of it is charged there. */
         PoolHostRoom: {
@@ -8406,6 +8418,8 @@ export interface components {
                 docker_wait?: string | null;
                 /** Format: int64 */
                 shm_size_mb?: number | null;
+                /** @description Always written, [] for a pool that maps none, so an import clears a target's devices. */
+                devices?: string[];
             };
             cache: components["schemas"]["CacheConfig"];
             tmpfs?: components["schemas"]["TmpfsConfig"];

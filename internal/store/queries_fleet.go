@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -329,6 +330,14 @@ func (s *Store) poolInsert(p *Pool) (string, []any, error) {
 
 // poolJSON encodes the six columns a pool keeps as JSON documents.
 func poolJSON(p *Pool) (res, cache, settings, burst, tmpfs, memoryBurst string, err error) {
+	if at := p.RunnerSettings.DevicesChangedAt; at != nil && at.IsZero() {
+		// The API marks a change of devices with a zero time; it is the
+		// time of this write, by the clock runner rows are created by, to the
+		// nanosecond: a runner row read back to the millisecond in the same
+		// millisecond reads as older, and is replaced rather than trusted.
+		stamp := p.UpdatedAt
+		p.RunnerSettings.DevicesChangedAt = &stamp
+	}
 	if res, err = marshalJSON(p.Resources); err != nil {
 		return
 	}
@@ -414,7 +423,7 @@ func (s *Store) ListPools(ctx context.Context) ([]*Pool, error) {
 
 // poolClaimCols are the columns ClaimView keeps, in the order ListPoolsForClaim
 // scans them.
-const poolClaimCols = `id, name, installation_id, labels, backend, arch, enabled, no_default_labels, auto_key`
+const poolClaimCols = `id, name, installation_id, labels, backend, arch, enabled, no_default_labels, auto_key, runner_settings`
 
 // ClaimView is a pool with only the fields a claim reads, and every other field
 // zero. Which pool takes a job is decided by whether a pool is enabled, which
@@ -422,7 +431,10 @@ const poolClaimCols = `id, name, installation_id, labels, backend, arch, enabled
 // the ones every runner does, and, where two fit equally, by name, by ID, by
 // whether the controller keeps the pool from its hosts (the auto key) and by its
 // architecture. The backend is there because the queued-to-started histogram is
-// labelled with it. The labels are shared with the pool, not copied.
+// labelled with it. The labels are shared with the pool, not copied. A pool's
+// devices are kept too: a pool that maps devices takes only jobs that ask for
+// its own labels (scheduler.PoolMatches), and a claim must not route an
+// ordinary job to it.
 //
 // It is what ListPoolsForClaim returns, and the one place that says which fields
 // those are: a test in internal/scheduler fills the others in with values of
@@ -432,6 +444,7 @@ func ClaimView(p *Pool) *Pool {
 		ID: p.ID, Name: p.Name, InstallationID: p.InstallationID, Labels: p.Labels,
 		Backend: p.Backend, Platform: Platform{Arch: p.Platform.Arch},
 		Enabled: p.Enabled, NoDefaultLabels: p.NoDefaultLabels, AutoKey: p.AutoKey,
+		RunnerSettings: RunnerSettings{Devices: p.RunnerSettings.Devices},
 	}
 }
 
@@ -451,9 +464,21 @@ func (s *Store) ListPoolsForClaim(ctx context.Context) ([]*Pool, error) {
 	for rows.Next() {
 		var p Pool
 		var enabled, noDefaultLabels int
+		var settings sql.NullString
 		if err := rows.Scan(&p.ID, &p.Name, &p.InstallationID, &p.Labels, &p.Backend, &p.Platform.Arch,
-			&enabled, &noDefaultLabels, &p.AutoKey); err != nil {
+			&enabled, &noDefaultLabels, &p.AutoKey, &settings); err != nil {
 			return nil, err
+		}
+		if strings.Contains(settings.String, `"devices"`) {
+			// Only the devices are read; most pools have none, and pay a
+			// substring test for it.
+			var rs struct {
+				Devices []string `json:"devices"`
+			}
+			if err := json.Unmarshal([]byte(settings.String), &rs); err != nil {
+				return nil, fmt.Errorf("pool %s runner settings: %w", p.ID, err)
+			}
+			p.RunnerSettings.Devices = rs.Devices
 		}
 		p.Enabled, p.NoDefaultLabels = enabled == 1, noDefaultLabels == 1
 		out = append(out, &p)

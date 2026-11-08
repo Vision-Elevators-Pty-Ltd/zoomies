@@ -146,6 +146,10 @@ type Options struct {
 	Doctor HostDoctor
 	// Name is how this host appears in the UI and in `zoomies hosts`.
 	Name string
+	// DevicesOnly is agent.devices_only: this agent takes only runners of
+	// pools that map host devices, says so (FeatureDevicesOnly), and refuses
+	// any other create.
+	DevicesOnly bool
 	// WorkDir holds the agent's credentials and the runners' scratch space.
 	WorkDir string
 	// Capacity is the most runners this host will hold, and doubles as the
@@ -1767,6 +1771,22 @@ func (a *Agent) handleCreate(ctx context.Context, task Task, release func()) {
 	spec := *task.Spec
 	if spec.RunnerID == "" {
 		spec.RunnerID = task.RunnerID
+	}
+	if !a.opts.DevicesOnly && len(spec.Devices) > 0 {
+		// Device pools go only to agents reserved for them: this one's daemon
+		// runs general jobs, and must not be the one given a host device.
+		release()
+		a.reportFailure(ctx, task, fmt.Sprintf("pool %q maps %s, and only an agent reserved for device pools (agent.devices_only) takes such a runner; nothing was created", spec.PoolName, strings.Join(spec.Devices, ", ")), store.FaultConfig)
+		return
+	}
+	if a.opts.DevicesOnly && len(spec.Devices) == 0 {
+		// The controller places no such runner here (FeatureDevicesOnly); one
+		// that arrives anyway, from an older controller or a race with a
+		// restart, is refused, because this agent's daemon can open devices
+		// that a general job must never reach.
+		release()
+		a.reportFailure(ctx, task, fmt.Sprintf("this agent is reserved for pools that map host devices (agent.devices_only), and pool %q maps none; nothing was created", spec.PoolName), store.FaultConfig)
+		return
 	}
 
 	// Delivery is at-least-once. A create whose result never reached the

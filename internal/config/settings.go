@@ -539,6 +539,10 @@ var registry = buildRegistry([]Setting{
 		Key: "agent.allow_insecure_http", Label: "Allow plain HTTP to the controller", Env: "ZOOMIES_AGENT_ALLOW_INSECURE_HTTP", Kind: KindBool, Scope: ScopeLocal,
 		Summary: "Let a standalone agent use a plain http:// controller URL off loopback, which puts its token and every runner credential on the wire in the clear. It is configured on that agent's own host.",
 	},
+	{
+		Key: "agent.devices_only", Label: "Only pools that map devices", Env: "ZOOMIES_AGENT_DEVICES_ONLY", Kind: KindBool, Scope: ScopeLocal,
+		Summary: "Reserve this agent for pools that map host devices (runner_settings.devices): only it takes them, no other pool is placed on it, and it refuses any other runner. The host stays reserved even if a later agent stops saying so. Set it in the YAML, which an older release refuses to start with. It is configured on that agent's own host.",
+	},
 
 	// ---------------------------------------------------------------------
 	// runners -- what every runner is started with. The controller writes

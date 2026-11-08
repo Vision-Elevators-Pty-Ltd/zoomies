@@ -1,0 +1,54 @@
+# zoomies-agent-emulator.service: the agent of the runner-emu user, reserved
+# for pools that map /dev/kvm (agent.devices_only: true in its own YAML).
+#
+# Complete and standalone: it is not a copy of the host's other agent units,
+# and shares no directory, environment file or group with them. Its config is
+# /etc/zoomies-emu/zoomies.yaml (written by `zoomies agent join --no-service
+# --config-dir /etc/zoomies-emu --state-dir /var/lib/zoomies-emu`), its state
+# /var/lib/zoomies-emu, its Docker the runner-emu user's rootless daemon,
+# named by agent.docker_host in that YAML. There is deliberately no
+# StateDirectory=, ConfigurationDirectory=, EnvironmentFile= or
+# SupplementaryGroups=: systemd would chown a shared StateDirectory to this
+# user, and an environment file could point the agent at another daemon.
+#
+# Install: copy to /etc/systemd/system/, check `systemd-analyze verify` and
+# `systemctl cat zoomies-agent-emulator` show exactly this, then
+# `systemctl daemon-reload && systemctl enable --now zoomies-agent-emulator`.
+
+[Unit]
+Description=Zoomies runner agent (runner-emu, device pools only)
+Documentation=https://github.com/eyupio/zoomies
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=runner-emu
+Group=runner-emu
+ExecStart=/usr/local/bin/zoomies agent --config /etc/zoomies-emu/zoomies.yaml
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30min
+KillSignal=SIGTERM
+KillMode=process
+WorkingDirectory=/var/lib/zoomies-emu
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# /run/user/<uid> holds the rootless daemon's socket and rootlesskit's
+# child_pid, which the agent reads for the gid map: visible, never writable.
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0027
+ReadWritePaths=/var/lib/zoomies-emu
+
+[Install]
+WantedBy=multi-user.target

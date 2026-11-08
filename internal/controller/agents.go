@@ -749,6 +749,12 @@ func (c *Controller) join(ctx context.Context, req agent.JoinRequest, ip string,
 		c.withdrawHostUpdates(existing.ID)
 		h.Embedded = existing.Embedded || embedded
 		h.Cordoned = existing.Cordoned
+		// A reservation for device pools is the controller's record of what
+		// the machine's daemon can open, and a re-join (an agent rolled back,
+		// or restarted without agent.devices_only) changes nothing about that
+		// daemon: the host stays reserved, as it does across heartbeats
+		// (store.KeepReservation). Only retiring the host lifts it.
+		h.Features = store.KeepReservation(existing.Features, req.Features)
 		// The reserve is the operator's, and a re-join is something the agent
 		// does: a rebuilt machine reclaiming its row, or an embedded agent
 		// whose credentials no longer match. Letting it drop here would be the
@@ -970,7 +976,7 @@ func (c *Controller) Heartbeat(ctx context.Context, hostID string, req agent.Hea
 		// rolled back to a release that cannot move a live quota has to stop
 		// being counted as one that can, or an elastic pool keeps reading its
 		// runners there as boostable when they are held at their share.
-		!slices.Equal(req.Features, h.Features) ||
+		!slices.Equal(store.KeepReservation(h.Features, req.Features), h.Features) ||
 		// A host resized in place -- a VM given more cores, a container's
 		// cgroup limit raised -- has to stop describing itself as the machine
 		// it used to be, or its name and every pool sized from it go stale.
@@ -985,7 +991,7 @@ func (c *Controller) Heartbeat(ctx context.Context, hostID string, req agent.Hea
 			h.BackendInfo = probed
 		}
 		h.Version = firstNonEmpty(req.Version, h.Version)
-		h.Features = req.Features
+		h.Features = store.KeepReservation(h.Features, req.Features)
 		if req.CPUs > 0 {
 			h.CPUs = req.CPUs
 		}
@@ -1266,7 +1272,7 @@ func (c *Controller) PollTasks(ctx context.Context, hostID string, wait time.Dur
 	if !c.mayAct() {
 		return &agent.TaskBatch{Backoff: time.Second}, nil
 	}
-	if tasks := q.take(maxTasksPerPoll, c.Now()); len(tasks) > 0 {
+	if tasks := c.gateDeviceCreates(ctx, hostID, q, q.take(maxTasksPerPoll, c.Now())); len(tasks) > 0 {
 		c.stampIssued(ctx, tasks)
 		return &agent.TaskBatch{Tasks: tasks}, nil
 	}
@@ -1298,7 +1304,7 @@ func (c *Controller) PollTasks(ctx context.Context, hostID string, wait time.Dur
 		if !c.mayAct() {
 			return &agent.TaskBatch{Backoff: time.Second}, nil
 		}
-		tasks := q.take(maxTasksPerPoll, c.Now())
+		tasks := c.gateDeviceCreates(ctx, hostID, q, q.take(maxTasksPerPoll, c.Now()))
 		c.stampIssued(ctx, tasks)
 		return &agent.TaskBatch{Tasks: tasks}, nil
 	}

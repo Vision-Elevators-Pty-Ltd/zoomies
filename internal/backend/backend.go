@@ -342,6 +342,12 @@ type Spec struct {
 	// the field sends, leaves the engine's own 64 MB. It is held to the
 	// runner's memory limit, which its pages are charged to.
 	ShmSizeMB int64 `json:"shm_size_mb,omitempty"`
+	// Devices are host devices to map into the runner container (not a
+	// docker-in-docker sidecar), from the pool's runner_settings.devices. The
+	// agent refuses a runner whose devices it cannot give (devices.go). An
+	// agent older than the field ignores it, which is why only hosts with a
+	// label the pool selects run such a pool.
+	Devices []string `json:"devices,omitempty"`
 	// WorkDir is the host directory this runner may use as scratch space.
 	WorkDir string `json:"work_dir,omitempty"`
 	// RunnerVersion pins the actions/runner release for the process backend,
@@ -368,6 +374,18 @@ func (s *Spec) Validate() error {
 	}
 	if s.PullPolicy == store.PullPinnedOnly && !isDigestImageReference(s.Image) {
 		return errors.New("backend: pinned-only requires an image digest")
+	}
+	for _, d := range s.Devices {
+		if _, ok := store.PoolDevices[d]; !ok {
+			return fmt.Errorf("backend: %q is not a device a runner may be given", d)
+		}
+	}
+	if len(s.Devices) > 0 && s.DockerMode != store.DockerNone && s.DockerMode != "" {
+		// A privileged docker-in-docker sidecar is given every host device
+		// whatever HostConfig.Devices says, and a host socket lets the job
+		// ask the daemon for any of them: the pool's API validation says the
+		// same (store.DeviceProblems), and this holds it on the host.
+		return fmt.Errorf("backend: a runner that maps %s must use docker_mode none, not %s", strings.Join(s.Devices, ", "), s.DockerMode)
 	}
 	return nil
 }

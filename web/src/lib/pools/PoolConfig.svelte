@@ -59,7 +59,7 @@
   /* Only the timings this pool actually overrides. The rest follow the fleet,
      and a row per setting saying "the fleet's" would bury the two that do not. */
   const OVERRIDE_LABELS: readonly {
-    key: Exclude<keyof RunnerSettings, 'shm_size_mb'>;
+    key: Exclude<keyof RunnerSettings, 'shm_size_mb' | 'devices'>;
     label: string;
   }[] = [
     { key: 'provision_timeout', label: 'Provision timeout' },
@@ -83,6 +83,11 @@
         label: 'Shared memory',
         value: shm === 0 ? "Docker's 64 MB" : `${formatNumber(shm)} MB`,
       });
+    }
+    // Host devices mapped into the runners, such as /dev/kvm.
+    const devices = settings.devices ?? [];
+    if (devices.length > 0) {
+      out.push({ label: 'Host devices', value: devices.join(', ') });
     }
     return out;
   });

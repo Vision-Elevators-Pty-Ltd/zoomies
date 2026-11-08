@@ -230,6 +230,30 @@ func (cc *clientCache) runnerGroupID(ctx context.Context, inst *store.Installati
 	return found.ID, "", found.PublicRepositoryAccessKnown && !found.AllowsPublicRepositories
 }
 
+// currentRunnerGroup asks GitHub, now and past the cache, for the runner group
+// with id, for a registration that must not rest on a policy read earlier: a
+// pool that maps devices (deviceGroupRefusal). The zero group where id is 0
+// or GitHub lists none with it; an error, which the caller refuses on, where
+// GitHub did not answer.
+func (cc *clientCache) currentRunnerGroup(ctx context.Context, inst *store.Installation, client github.Client, id int64) (github.RunnerGroup, error) {
+	if id == 0 || inst.TargetType != store.TargetOrg {
+		return github.RunnerGroup{}, nil
+	}
+	groups, err := client.ListRunnerGroups(ctx)
+	if errors.Is(err, github.ErrRateLimited) {
+		cc.c.holdRateLimited(inst.ID, err, cc.c.Now(), "checking a device pool's runner group")
+	}
+	if err != nil {
+		return github.RunnerGroup{}, err
+	}
+	for _, g := range groups {
+		if g.ID == id {
+			return g, nil
+		}
+	}
+	return github.RunnerGroup{}, nil
+}
+
 // probeLoop re-checks every installation's credentials on an interval, so a
 // revoked App or a rotated key shows up on the Installations page instead of
 // as runners that quietly stop being created.

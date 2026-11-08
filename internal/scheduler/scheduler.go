@@ -1253,6 +1253,14 @@ func (t *tick) reap(p *store.Pool, runners []*store.Runner) (actions []Action, r
 			// same tick when the pool still wants it.
 			retires = append(retires, t.action(ActionDrain, p, r, fmt.Sprintf(
 				"pool image is now %s; this runner was made from %s", p.Image, r.Image)))
+		case staleDevices(p, r, t.hosts.byID(r.HostID)) != "" && r.State != store.RunnerBusy && r.State != store.RunnerDraining && !t.stillRunning[r.ID]:
+			// A container keeps the devices it was created with. A runner
+			// made before its pool's devices changed, or one on a host its
+			// device pool no longer selects (the kvm=ok label removed), would
+			// take the next job under a policy that no longer allows it.
+			// Busy, it finishes its job (an ephemeral runner then ends); idle
+			// or starting, it is replaced now.
+			retires = append(retires, t.action(ActionDrain, p, r, staleDevices(p, r, t.hosts.byID(r.HostID))))
 		default:
 			remaining = append(remaining, r)
 		}
@@ -1263,6 +1271,39 @@ func (t *tick) reap(p *store.Pool, runners []*store.Runner) (actions []Action, r
 	actions = append(actions, fails...)
 	actions = append(actions, retires...)
 	return actions, remaining
+}
+
+// staleDevices says why a runner can no longer be trusted with its pool's
+// device policy, or "" where it can: it was created before the pool's devices
+// last changed (store.RunnerSettings.DevicesChangedAt), or its host no longer
+// takes the pool (HostTakesDevicesOf, or the pool's host_selector, for a pool
+// that maps devices), or it is a general runner on a host reserved for device
+// pools. A pool that maps nothing, and never changed its devices, on a host
+// that is not reserved is never touched by this.
+func staleDevices(p *store.Pool, r *store.Runner, h *store.Host) string {
+	if at := p.RunnerSettings.DevicesChangedAt; at != nil && r.CreatedAt.Before(*at) {
+		return "the pool's devices changed after this runner was made, and a container keeps the devices it was created with"
+	}
+	if h == nil {
+		return ""
+	}
+	switch {
+	case p.MapsDevices() && !HostSelects(h, p):
+		return fmt.Sprintf("the pool maps %s and %s no longer takes it (its labels or agent changed)", strings.Join(p.RunnerSettings.Devices, ", "), h.Name)
+	case !p.MapsDevices() && h.Supports(store.FeatureDevicesOnly):
+		return fmt.Sprintf("%s is reserved for pools that map devices", h.Name)
+	}
+	return ""
+}
+
+// byID is the host with that ID, or nil.
+func (s *hostSet) byID(id string) *store.Host {
+	for _, h := range s.hosts {
+		if h.ID == id {
+			return h
+		}
+	}
+	return nil
 }
 
 // staleImage reports whether a runner was made from an image other than the
@@ -2464,12 +2505,30 @@ func HostOffers(h *store.Host, p *store.Pool) bool {
 // for arm64 or windows across a fleet nobody has labelled, which is the case
 // this indirection exists for.
 func HostSelects(h *store.Host, p *store.Pool) bool {
+	if !HostTakesDevicesOf(h, p) {
+		return false
+	}
 	for k, v := range p.HostSelector {
 		if h.SelectorValue(k) != v {
 			return false
 		}
 	}
 	return true
+}
+
+// HostTakesDevicesOf is the device half of HostSelects. A pool that maps host
+// devices goes only to a host that is reserved for device pools
+// (store.FeatureDevicesOnly, which the controller keeps once a host has said
+// it) and whose agent maps devices now (store.FeatureDevices; an older agent
+// would ignore the field and start a runner without the device). An ordinary
+// agent never takes one, whatever its labels. A reserved host takes no other
+// pool, even once an older agent there stops saying so. A pool that maps
+// nothing on a host that is not reserved is untouched by this.
+func HostTakesDevicesOf(h *store.Host, p *store.Pool) bool {
+	if p.MapsDevices() {
+		return h.Supports(store.FeatureDevices) && h.Supports(store.FeatureDevicesOnly)
+	}
+	return !h.Supports(store.FeatureDevicesOnly)
 }
 
 // blockage is why one pool could not be placed: what is true, what to change,
@@ -2509,7 +2568,7 @@ func (hs *hostSet) why(p *store.Pool) blockage {
 			noEligibleHost: true,
 		}
 	}
-	var unhealthy, cordoned, incompatible, backend, platform, selector, profile, tooSmall, full int
+	var unhealthy, cordoned, incompatible, backend, platform, noDevices, reserved, selector, profile, tooSmall, full int
 	var shortCPU, shortMemory, lowDisk, held, warming, throttled, committed int
 	// candidates are the hosts that could run this pool whatever they are doing
 	// at the moment. Of those, waiting counts the ones that only need a job to
@@ -2543,6 +2602,10 @@ func (hs *hostSet) why(p *store.Pool) blockage {
 			}
 		case !HostIsPlatform(h, p):
 			platform++
+		case p.MapsDevices() && !(h.Supports(store.FeatureDevices) && h.Supports(store.FeatureDevicesOnly)):
+			noDevices++
+		case !p.MapsDevices() && h.Supports(store.FeatureDevicesOnly):
+			reserved++
 		case !HostSelects(h, p):
 			selector++
 		case ExcludedBySize(h, p) != nil:
@@ -2656,6 +2719,8 @@ func (hs *hostSet) why(p *store.Pool) blockage {
 	add(incompatible, "running an agent this controller cannot talk to")
 	add(backend, "without the "+string(p.Backend)+" backend")
 	add(platform, "not "+p.Platform.Describe())
+	add(noDevices, "whose agent is not a current one reserved for device pools (agent.devices_only)")
+	add(reserved, "reserved for pools that map devices")
 	add(selector, "not matching the pool's host selector")
 	add(profile, "excluded by their runner profile")
 	add(tooSmall, "too small for this pool's limits")

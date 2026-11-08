@@ -202,6 +202,10 @@ func (a *Agent) features() []string {
 	if a.selfUpdateReady() {
 		out = append(out, FeatureSelfUpdate)
 	}
+	out = append(out, FeatureDevices)
+	if a.opts.DevicesOnly {
+		out = append(out, FeatureDevicesOnly)
+	}
 	return out
 }
 

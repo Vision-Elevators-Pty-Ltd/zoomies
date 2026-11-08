@@ -284,7 +284,7 @@ func TestGitHubAttentionObservationsDoNotAcknowledgeOrHideNewFailures(t *testing
 			t.Fatal("GitHub observation forged an acknowledgement")
 		}
 	}
-	if err := s.PruneJobAttentionRuns(ctx); err != nil {
+	if _, err := s.PruneJobAttentionRuns(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -437,5 +437,73 @@ func TestSettledRunsAreCheckedAgainHourlyAndTheRestEveryFiveMinutes(t *testing.T
 	}
 	if got := dueAt(61 * time.Minute); !slices.Equal(got, []int64{1, 2, 3, 4}) {
 		t.Fatalf("an hour later the runs due are %v, want the closed run looked at again", got)
+	}
+}
+
+// Finding 65: the prune seeks idx_jobs_run for each record. Written plainly it
+// walked idx_jobs_repo instead, every job of the repository in the window per
+// record, and took 75 s on the live controller.
+func TestPruningJobAttentionRunsSeeksTheRunIndex(t *testing.T) {
+	s := newTestStore(t)
+	rows, err := s.read.QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+pruneJobAttentionRunsSQL, int64(0))
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	joined := strings.Join(plan, "\n")
+	if !strings.Contains(joined, "idx_jobs_run") || strings.Contains(joined, "idx_jobs_repo") {
+		t.Fatalf("the prune does not seek idx_jobs_run:\n%s", joined)
+	}
+}
+
+// The prune forgets exactly the records of runs with no job left in the
+// window, and says how many.
+func TestPruningJobAttentionRunsKeepsRunsInTheWindow(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := s.Now()
+	recent := &Job{GitHubJobID: 101, GitHubRunID: 1, Repo: "acme/repo", State: JobCompleted, Conclusion: "failure", QueuedAt: now.Add(-time.Hour)}
+	old := &Job{GitHubJobID: 102, GitHubRunID: 2, Repo: "acme/repo", State: JobCompleted, Conclusion: "failure", QueuedAt: now.Add(-AttentionWindow - time.Hour)}
+	for _, j := range []*Job{recent, old} {
+		if _, err := s.UpsertJob(ctx, j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, rec := range []struct {
+		repo string
+		run  int64
+	}{{"acme/repo", 1}, {"acme/repo", 2}, {"acme/repo", 3}, {"other/repo", 1}} {
+		if err := s.RecordJobAttentionRun(ctx, rec.repo, rec.run, "", now, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.PruneJobAttentionRuns(ctx)
+	if err != nil || n != 3 {
+		t.Fatalf("pruned %d, %v; want the three with no job in the window", n, err)
+	}
+	var left []string
+	rows, err := s.read.QueryContext(ctx, `SELECT repo || '#' || run_id FROM job_attention_runs ORDER BY 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			t.Fatal(err)
+		}
+		left = append(left, k)
+	}
+	if len(left) != 1 || left[0] != "acme/repo#1" {
+		t.Fatalf("left %v, want only acme/repo#1", left)
 	}
 }

@@ -778,6 +778,42 @@ The fleet's own defaults are held in the right order by a test and by
 `pool.provision_timeout_short`, which the editor also says while the number is
 being chosen.
 
+### Host devices (`/dev/kvm`)
+
+`runner_settings.devices` maps host devices into a pool's runner containers, at
+the same path, for jobs that need one: today only `/dev/kvm`, for jobs that boot
+an Android emulator. It is not a fleet setting and has no default; a pool that
+does not set it is unchanged. The sidecar of a docker-in-docker pool is not
+given the device.
+
+- **Placement.** A pool that maps `/dev/kvm` must select `kvm: ok` in its
+  `host_selector`, and the API refuses it otherwise. The ordinary host-selector
+  match then places it only on hosts labelled `kvm=ok`. Label a host so only if
+  `/dev/kvm` really exists there (ci-nl-01 and ci-nl-02 have it; sa-ci-01 does
+  not).
+- **The agent's check.** Before it pulls or creates anything, the agent checks
+  each device on its own host. It refuses the runner, with an error saying what
+  to fix, where the device is missing, is not a character device, or could not
+  be opened by the runner's user.
+- **Who can open it.** On the hosts, `/dev/kvm` is `crw-rw---- root kvm`.
+  - Under a daemon that runs as root, the runner is given the device's group
+    as a supplementary group, like the host socket's.
+  - Under rootless Docker, which the agents use, putting the agent's user in
+    the `kvm` group is necessary but not enough. runc sets the container's own
+    groups, so the host user's supplementary groups do not reach the runner:
+    measured on ci-nl-02 on 8 November 2026, a container had only its own
+    group, and `/dev/kvm` showed as `65534:65534`.
+  - For rootless Docker, do one of these on the host:
+    - **Map the kvm group into the user's namespace.** Add an `/etc/subgid`
+      entry `<user>:<kvm gid>:1` for the agent's user, then restart that user's
+      rootless docker, which ends its running runners: do it in a maintenance
+      window. The agent reads the daemon's group map (rootlesskit's
+      `child_pid`) and gives the runner the group `kvm` is mapped to.
+    - **Let every user open the device** with a udev rule:
+      `KERNEL=="kvm", GROUP="kvm", MODE="0666"`, applied with
+      `udevadm trigger --name-match=kvm`. GitHub's hosted runners do the
+      same. No group is then needed.
+
 ### Keeping the work folder in memory
 
 A runner's work folder (the checkout, build output, the runner's own temporary

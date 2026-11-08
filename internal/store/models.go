@@ -860,6 +860,53 @@ type RunnerSettings struct {
 	// ShmSizeMB is the size of /dev/shm in a runner container of this pool,
 	// in MB. Overrides runners.shm_size_mb; zero leaves Docker's own 64 MB.
 	ShmSizeMB *int64 `json:"shm_size_mb,omitempty"`
+	// Devices are host devices mapped into this pool's runner containers, at
+	// the same path (not the docker-in-docker sidecar). Only those in
+	// PoolDevices, and only on a pool whose host_selector selects the label
+	// each needs, so the pool is placed only on hosts that have it. The fleet
+	// has no default: empty is none.
+	Devices []string `json:"devices,omitempty"`
+}
+
+// DeviceLabel is the host label a pool must select to map a device.
+type DeviceLabel struct{ Key, Value string }
+
+// PoolDevices are the host devices a pool may map into its runners, each
+// with the host label its pool must select (host_selector): /dev/kvm, for
+// jobs that boot an emulator, on hosts labelled kvm=ok, which only a host
+// that has /dev/kvm should be. The agent checks the device again before it
+// creates a runner, and refuses one it cannot give.
+var PoolDevices = map[string]DeviceLabel{
+	"/dev/kvm": {Key: "kvm", Value: "ok"},
+}
+
+// DeviceProblems is what is wrong with a pool's devices: one not in
+// PoolDevices, one named twice, or one whose label the pool's host_selector
+// does not select. Empty where nothing is.
+func DeviceProblems(devices []string, hostSelector map[string]string, backend BackendKind) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, d := range devices {
+		label, ok := PoolDevices[d]
+		switch {
+		case !ok:
+			known := make([]string, 0, len(PoolDevices))
+			for k := range PoolDevices {
+				known = append(known, k)
+			}
+			slices.Sort(known)
+			out = append(out, fmt.Sprintf("%q is not a device a pool may map; the devices are %s", d, strings.Join(known, ", ")))
+		case seen[d]:
+			out = append(out, fmt.Sprintf("%s is named twice", d))
+		case hostSelector[label.Key] != label.Value:
+			out = append(out, fmt.Sprintf("a pool that maps %s must select hosts labelled %s=%s in its host_selector, so it is placed only on hosts that have the device", d, label.Key, label.Value))
+		}
+		seen[d] = true
+	}
+	if len(devices) > 0 && backend != BackendDocker && backend != BackendPodman {
+		out = append(out, fmt.Sprintf("devices can be mapped only into container runners; the %s backend has none", backend))
+	}
+	return out
 }
 
 // Set reports whether this pool overrides anything at all, which is what the
@@ -867,7 +914,7 @@ type RunnerSettings struct {
 // a figure came from the pool.
 func (r RunnerSettings) Set() bool {
 	return r.ProvisionTimeout != nil || r.DrainTimeout != nil || r.MaxRunnerLifetime != nil ||
-		r.ScaleUpDelay != nil || r.DockerWait != nil || r.ShmSizeMB != nil
+		r.ScaleUpDelay != nil || r.DockerWait != nil || r.ShmSizeMB != nil || len(r.Devices) > 0
 }
 
 // Supports reports whether this host's agent advertises a feature. The

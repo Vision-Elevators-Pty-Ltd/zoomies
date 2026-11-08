@@ -172,3 +172,55 @@ func TestAPoolsShmSizeSurvivesTheRoundTrip(t *testing.T) {
 		cookie: cookie, body: map[string]any{"runner_settings": map[string]any{"shm_size_mb": -1}}})
 	res.mustNotSucceed(t, "a negative shm_size_mb")
 }
+
+// runner_settings.devices: /dev/kvm only, and only on a pool that selects
+// kvm=ok hosts; absent keeps it, null clears it, and the export carries it.
+func TestAPoolMapsKVMOnlyOnKVMHosts(t *testing.T) {
+	h := newHarness(t)
+	inst := h.installation()
+	u, _ := h.user("operator", store.RoleOperator)
+	cookie := h.session(u)
+
+	body := poolBody(inst.ID)
+	body["runner_settings"] = map[string]any{"devices": []string{"/dev/kvm"}}
+	h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body}).mustNotSucceed(t, "kvm without the kvm=ok selector")
+
+	body["runner_settings"] = map[string]any{"devices": []string{"/dev/sda"}}
+	body["host_selector"] = map[string]string{"kvm": "ok"}
+	h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body}).mustNotSucceed(t, "a device that is not /dev/kvm")
+
+	body["runner_settings"] = map[string]any{"devices": []string{"/dev/kvm"}}
+	res := h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body})
+	res.mustStatus(t, http.StatusCreated, "create")
+	var created controller.PoolView
+	res.into(t, &created)
+	if d := created.RunnerSettings.Devices; len(d) != 1 || d[0] != "/dev/kvm" {
+		t.Fatalf("devices = %v", d)
+	}
+
+	res = h.do(request{method: http.MethodPatch, path: "/api/v1/pools/" + created.ID,
+		cookie: cookie, body: map[string]any{"runner_settings": map[string]any{"shm_size_mb": 4096}}})
+	res.mustStatus(t, http.StatusOK, "patch another setting")
+	var kept controller.PoolView
+	res.into(t, &kept)
+	if len(kept.RunnerSettings.Devices) != 1 {
+		t.Fatalf("an absent devices field dropped them: %v", kept.RunnerSettings.Devices)
+	}
+
+	h.do(request{method: http.MethodPatch, path: "/api/v1/pools/" + created.ID,
+		cookie: cookie, body: map[string]any{"host_selector": map[string]string{}}}).mustNotSucceed(t, "dropping kvm=ok while mapping kvm")
+
+	doc := documentPool(&store.Pool{Name: "emulator", RunnerSettings: store.RunnerSettings{Devices: []string{"/dev/kvm"}}}, "")
+	if len(doc.RunnerSettings.Devices) != 1 {
+		t.Fatalf("the export dropped devices: %+v", doc.RunnerSettings)
+	}
+
+	res = h.do(request{method: http.MethodPatch, path: "/api/v1/pools/" + created.ID,
+		cookie: cookie, body: map[string]any{"runner_settings": map[string]any{"devices": nil}}})
+	res.mustStatus(t, http.StatusOK, "patch null")
+	var cleared controller.PoolView
+	res.into(t, &cleared)
+	if len(cleared.RunnerSettings.Devices) != 0 {
+		t.Fatalf("null left devices %v", cleared.RunnerSettings.Devices)
+	}
+}

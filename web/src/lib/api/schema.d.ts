@@ -7764,6 +7764,13 @@ export interface components {
              * @example 2048
              */
             shm_size_mb?: number | null;
+            /**
+             * @description Host devices mapped into this pool's runner containers at the same path (not a docker-in-docker sidecar), for jobs such as an Android emulator that need `/dev/kvm`. Only `/dev/kvm`, only on the docker and podman backends, and only on a pool whose `host_selector` selects `kvm: ok`, so it is placed only on hosts labelled with it. The agent checks the device before it creates a runner and refuses one it cannot give, saying why: a missing device, or one the runner's user could not open. No fleet default: absent keeps the pool's, `null` or `[]` maps none. An agent older than the option ignores it, which is why the host label, not the agent, decides placement.
+             * @example [
+             *       "/dev/kvm"
+             *     ]
+             */
+            devices?: "/dev/kvm"[] | null;
         };
         /** @description One host's room for a pool: what it promises, what the machine can back at that pool's size, and what one runner of it is charged there. */
         PoolHostRoom: {
@@ -8406,6 +8413,7 @@ export interface components {
                 docker_wait?: string | null;
                 /** Format: int64 */
                 shm_size_mb?: number | null;
+                devices?: string[];
             };
             cache: components["schemas"]["CacheConfig"];
             tmpfs?: components["schemas"]["TmpfsConfig"];

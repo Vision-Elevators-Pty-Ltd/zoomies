@@ -207,6 +207,27 @@ type runnerSettingsIn struct {
 	// and a number mean what they mean for the timings, and 0 is a real
 	// answer, Docker's own 64 MB.
 	ShmSizeMB optionalMB `json:"shm_size_mb"`
+	// Devices are host devices mapped into the pool's runner containers
+	// (store.PoolDevices): absent keeps the pool's, null or [] maps none.
+	Devices optionalDevices `json:"devices"`
+}
+
+// optionalDevices is a list that may be absent.
+type optionalDevices struct {
+	present bool
+	value   []string
+}
+
+func (o *optionalDevices) UnmarshalJSON(b []byte) error {
+	o.present = true
+	if string(b) == "null" {
+		o.value = nil
+		return nil
+	}
+	if err := json.Unmarshal(b, &o.value); err != nil {
+		return fmt.Errorf("devices must be a list of device paths or null")
+	}
+	return nil
 }
 
 // optionalMB is optionalDuration for a whole number of MB.
@@ -234,6 +255,14 @@ func (o *optionalMB) UnmarshalJSON(b []byte) error {
 // request used, so the wizard can put the message under the input that
 // carried it.
 func (in *runnerSettingsIn) apply(rs *store.RunnerSettings, add func(field, msg string)) {
+	if in.Devices.present {
+		rs.Devices = nil
+		for _, d := range in.Devices.value {
+			if d = strings.TrimSpace(d); d != "" {
+				rs.Devices = append(rs.Devices, d)
+			}
+		}
+	}
 	if in.ShmSizeMB.present {
 		switch v := in.ShmSizeMB.value; {
 		case v == nil:
@@ -957,6 +986,9 @@ func (s *Server) validatePool(ctx context.Context, p *store.Pool, existingID str
 			add("host_selector", "a host selector key cannot be empty")
 			break
 		}
+	}
+	for _, problem := range store.DeviceProblems(p.RunnerSettings.Devices, p.HostSelector, p.Backend) {
+		add("runner_settings.devices", problem)
 	}
 	for k := range p.ProviderSelector {
 		if strings.TrimSpace(k) == "" {

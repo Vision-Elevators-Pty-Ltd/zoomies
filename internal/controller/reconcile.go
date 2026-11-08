@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"time"
 
@@ -666,6 +667,7 @@ func (c *Controller) finishCreateRunner(ctx context.Context, inst *store.Install
 		DinDImage:     pool.DinDImage,
 		RunAsRoot:     pool.RunAsRoot,
 		ShmSizeMB:     shmSizeMB(c.cfg().Runners, pool),
+		Devices:       slices.Clone(pool.RunnerSettings.Devices),
 		Network:       c.cfg().Agent.Network,
 		RunnerVersion: r.RunnerVersion,
 	}

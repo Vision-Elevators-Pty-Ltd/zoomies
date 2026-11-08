@@ -11836,6 +11836,20 @@ components:
             tmpfs, so only what a job writes is used, and that counts against the runner's memory
             limit, which also caps it. Applied by agents 1.4.1-vision.9 and later.
           examples: [2048]
+        devices:
+          type: array
+          nullable: true
+          items: { type: string, enum: ["/dev/kvm"] }
+          description: >-
+            Host devices mapped into this pool's runner containers at the same path (not a
+            docker-in-docker sidecar), for jobs such as an Android emulator that need `/dev/kvm`.
+            Only `/dev/kvm`, only on the docker and podman backends, and only on a pool whose
+            `host_selector` selects `kvm: ok`, so it is placed only on hosts labelled with it. The
+            agent checks the device before it creates a runner and refuses one it cannot give,
+            saying why: a missing device, or one the runner's user could not open. No fleet
+            default: absent keeps the pool's, `null` or `[]` maps none. An agent older than the
+            option ignores it, which is why the host label, not the agent, decides placement.
+          examples: [["/dev/kvm"]]
 
     PoolHostRoom:
       type: object
@@ -12536,6 +12550,7 @@ components:
             scale_up_delay: { type: string, nullable: true }
             docker_wait: { type: string, nullable: true }
             shm_size_mb: { type: integer, format: int64, nullable: true }
+            devices: { type: array, items: { type: string } }
         cache: { $ref: "#/components/schemas/CacheConfig" }
         tmpfs: { $ref: "#/components/schemas/TmpfsConfig" }
         host_selector: { type: object, additionalProperties: { type: string } }

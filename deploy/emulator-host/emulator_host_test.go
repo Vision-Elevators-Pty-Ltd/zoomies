@@ -147,7 +147,7 @@ func TestTheSmokeTestRunsItsProbeInTheRunnerImage(t *testing.T) {
 		bin := fakeBin(t, map[string]string{
 			"id":      `echo 1003`,
 			"getent":  `echo kvm:x:994:`,
-			"runuser": `while [ "$1" != -- ]; do shift; done; shift; exec "$@"`,
+			"runuser": `while [ "$1" != "--" ]; do shift; done; shift; exec "$@"`,
 			// The image's real behaviour: without --entrypoint its
 			// entrypoint runs and exits 64 whatever the command.
 			"docker": `printf '%s\n' "$@" > "` + argsFile + `"

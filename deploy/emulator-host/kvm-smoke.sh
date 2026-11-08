@@ -54,7 +54,7 @@ print(\"KVM-API\", fcntl.ioctl(fd, 0xAE00))
 "'
 
 run() {
-	runuser -u "$user" -- env DOCKER_HOST="$sock" XDG_RUNTIME_DIR="$rundir" \
+	runuser -u "$user" "--" env DOCKER_HOST="$sock" XDG_RUNTIME_DIR="$rundir" \
 		docker run --rm --device /dev/kvm "$@" --entrypoint /bin/sh "$image" -c "$probe" 2>&1 || true
 }
 

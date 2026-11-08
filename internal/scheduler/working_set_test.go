@@ -125,3 +125,45 @@ func TestTheWorkingSetFieldsMoveNoSchedulingFigure(t *testing.T) {
 		t.Fatalf("booker: %d/%d/%d with the fields, %d/%d/%d without", u1, r1, s1, u2, r2, s2)
 	}
 }
+
+// Review 3 of #20, finding 4, through the booking and history_raise this
+// history feeds: fifteen recent heavy untrusted runs beside five light
+// measured ones book and raise exactly as they did before the switch.
+func TestRecentUntrustedHeavyRunsStillBookAfterTheSwitch(t *testing.T) {
+	var runs []store.JobPeak
+	for range 15 {
+		runs = append(runs, store.JobPeak{Job: "build", MemoryMB: 8192, WorkingSetMB: -1})
+	}
+	for range 5 {
+		runs = append(runs, store.JobPeak{Job: "build", MemoryMB: 512, WorkingSetMB: 512, WorkingSetFinal: true, WorkflowPath: ".github/workflows/ci.yml"})
+	}
+	before, _ := historyBooking(runs, 25)
+	beforeRaise, _ := raiseNeedMB(runs, 25)
+	after, _ := historyBooking(store.PreferWorkingSet(runs), 25)
+	afterRaise, _ := raiseNeedMB(store.PreferWorkingSet(runs), 25)
+	if after < before || afterRaise < beforeRaise {
+		t.Fatalf("booking %d -> %d MiB, history_raise %d -> %d MiB: the untrusted heavy runs were dropped", before, after, beforeRaise, afterRaise)
+	}
+}
+
+// Review of #22 (abaa0f24), finding 2, in the scheduler: five identified
+// light runs at 512 MiB and fifteen older 16 GiB runs whose workflow file is
+// unknown. The booking and the raise both fell from 20,480 to 640 MiB when the
+// switch dropped the fifteen; they now stay where they were.
+func TestIdentifiedLightRunsKeepAnUnidentifiedHeavyJobsBookingAndRaise(t *testing.T) {
+	var peaks []store.JobPeak
+	for range 5 {
+		peaks = append(peaks, store.JobPeak{MemoryMB: 2048, WorkingSetMB: 512, WorkingSetFinal: true, WorkflowPath: ".github/workflows/light.yml"})
+	}
+	for range 15 {
+		peaks = append(peaks, store.JobPeak{MemoryMB: 16384})
+	}
+	switched := store.PreferWorkingSet(peaks)
+	bookBefore, _ := historyBooking(peaks, 25)
+	bookAfter, _ := historyBooking(switched, 25)
+	raiseBefore, _ := raiseNeedMB(peaks, 25)
+	raiseAfter, _ := raiseNeedMB(switched, 25)
+	if bookBefore != 20480 || bookAfter != bookBefore || raiseBefore != 20480 || raiseAfter != raiseBefore {
+		t.Fatalf("booking %d -> %d MiB, raise %d -> %d MiB; want 20,480 throughout", bookBefore, bookAfter, raiseBefore, raiseAfter)
+	}
+}

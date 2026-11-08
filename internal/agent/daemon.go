@@ -328,6 +328,11 @@ type Agent struct {
 	// "the controller has not mentioned it in a while" is measured.
 	orphans          map[backend.Handle]time.Time
 	inventoryPending map[store.BackendKind]bool
+	// removedWorkingSets is, by runner ID, the final working set of a runner
+	// a remove task took off the host, kept until a task result carrying it
+	// is accepted (workingset.go): the runner is no longer tracked, so no
+	// runner report can carry it.
+	removedWorkingSets map[string]removedWorkingSet
 	// removing records, by runner ID, when the daemon was first found still
 	// removing that runner's workload, and when it was last asked about. It is
 	// what bounds how long a slow removal is waited out before it is reported
@@ -428,6 +433,7 @@ type tracked struct {
 	// something.
 	workingSetPeak       int64
 	workingSetLastAt     time.Time
+	workingSetFirstAt    time.Time
 	runningSince         time.Time
 	workingSetIncomplete bool
 	exitCode             int
@@ -586,6 +592,8 @@ func New(opts Options) (*Agent, error) {
 		inventoryPending: make(map[store.BackendKind]bool),
 		removing:         make(map[string]removal),
 		cpuFactor:        1,
+
+		removedWorkingSets: make(map[string]removedWorkingSet),
 	}
 	a.logs = newLogRelay(opts.Transport, log)
 	// Built here rather than in Run, so the field is set before any goroutine
@@ -2009,9 +2017,10 @@ func (a *Agent) handleRemove(ctx context.Context, task Task, release func()) {
 		}
 		// A workload that is already gone is exactly what this task asked for.
 		a.removalPending(task.RunnerID, nil, a.now())
+		ws := a.removeWorkingSet(task.RunnerID, a.now())
 		a.untrack(task.RunnerID)
 		release()
-		a.report(ctx, TaskResult{TaskID: task.ID, Kind: task.Kind, RunnerID: task.RunnerID, OK: true, State: store.RunnerRemoved, CompletedAt: a.now()})
+		a.reportRemoved(ctx, TaskResult{TaskID: task.ID, Kind: task.Kind, RunnerID: task.RunnerID, OK: true, State: store.RunnerRemoved, CompletedAt: a.now(), WorkingSet: ws})
 		return
 	}
 
@@ -2022,10 +2031,11 @@ func (a *Agent) handleRemove(ctx context.Context, task Task, release func()) {
 	}
 
 	a.removalPending(task.RunnerID, nil, a.now())
+	ws := a.removeWorkingSet(task.RunnerID, a.now())
 	a.untrack(task.RunnerID)
 	a.log.Info("runner removed", "runner", task.RunnerID, "handle", handle)
 	release()
-	a.report(ctx, TaskResult{TaskID: task.ID, Kind: task.Kind, RunnerID: task.RunnerID, OK: true, Handle: handle, State: store.RunnerRemoved, CompletedAt: a.now()})
+	a.reportRemoved(ctx, TaskResult{TaskID: task.ID, Kind: task.Kind, RunnerID: task.RunnerID, OK: true, Handle: handle, State: store.RunnerRemoved, CompletedAt: a.now(), WorkingSet: ws})
 }
 
 // reportRemoveFailure answers a remove task whose removal did not complete.
@@ -2173,14 +2183,33 @@ func (a *Agent) runLogTask(ctx context.Context, task Task) {
 // because a result that never arrives leaves the controller waiting on a task
 // it will redeliver forever.
 func (a *Agent) report(ctx context.Context, res TaskResult) {
+	_ = a.deliver(ctx, res)
+}
+
+// deliver is report, saying whether the controller accepted the result.
+func (a *Agent) deliver(ctx context.Context, res TaskResult) error {
 	if res.CompletedAt.IsZero() {
 		res.CompletedAt = a.now()
 	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reportTimeout)
 	defer cancel()
-	if err := a.tr.ReportResult(rctx, res); err != nil {
+	err := a.tr.ReportResult(rctx, res)
+	if err != nil {
 		a.log.Error("could not report a task result; the controller will redeliver the task",
 			"task", res.TaskID, "runner", res.RunnerID, "ok", res.OK, "error", err)
+	}
+	return err
+}
+
+// reportRemoved answers a remove task that removed the runner, carrying its
+// final working set, which is forgotten only once the controller has the
+// result: a result that is lost is redelivered as a task that finds the
+// workload gone, and that answer carries the same working set.
+func (a *Agent) reportRemoved(ctx context.Context, res TaskResult) {
+	if a.deliver(ctx, res) == nil && res.WorkingSet != nil {
+		a.mu.Lock()
+		delete(a.removedWorkingSets, res.RunnerID)
+		a.mu.Unlock()
 	}
 }
 

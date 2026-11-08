@@ -151,7 +151,7 @@ func (a *Agent) ReconcileOnce(ctx context.Context) ([]RunnerReport, error) {
 			continue
 		}
 		msg := fmt.Sprintf("workload %s is no longer on host %s", r.handle, a.opts.Name)
-		a.closeWorkingSet(r.runnerID, r.handle, time.Time{}, now)
+		a.closeWorkingSet(r.runnerID, r.handle, time.Time{}, time.Time{}, now)
 		a.markTerminal(r.runnerID, store.RunnerRemoved, backend.PhaseGone, 0, msg, "", now)
 		a.log.Info("runner workload disappeared", "runner", r.runnerID, "handle", r.handle, "backend", r.kind)
 		reports = append(reports, RunnerReport{
@@ -182,7 +182,7 @@ func (a *Agent) observe(ctx context.Context, b backend.Backend, r tracked, w bac
 			return a.cleanUp(ctx, b, r, w, now)
 		}
 		state, msg, fault := terminalOutcome(r, w.Status)
-		a.closeWorkingSet(r.runnerID, r.handle, w.Status.ExitedAt, now)
+		a.closeWorkingSet(r.runnerID, r.handle, w.Status.StartedAt, w.Status.ExitedAt, now)
 		a.markTerminal(r.runnerID, state, w.Status.Phase, w.Status.ExitCode, msg, fault, now)
 		var tail []string
 		if fault != "" || w.Status.ExitCode != 0 {
@@ -626,10 +626,7 @@ func (a *Agent) markRunning(runnerID string, w backend.Workload, stats backend.S
 		// Coverage counts from the container's own start, so a runner this
 		// agent adopted after a restart, whose earlier readings are gone,
 		// is not taken for one it watched throughout.
-		r.runningSince = w.Status.StartedAt
-		if r.runningSince.IsZero() || r.runningSince.After(now) {
-			r.runningSince = now
-		}
+		r.startWorkingSet(w.Status.StartedAt, now)
 	}
 	// The stats loop owns r.stats; this observation may carry an older copy.
 	r.observedAt = now

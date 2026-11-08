@@ -745,7 +745,7 @@ var registry = buildRegistry([]Setting{
 	{
 		Key: "scheduler.working_set_history", Label: "Job history from working set", Env: "ZOOMIES_WORKING_SET_HISTORY", Kind: KindEnum, Scope: ScopeInstance, Live: true,
 		Choices: []string{"off", "on"},
-		Summary: "Whether booking, history raise and profiles read a job's working-set peaks (its memory less reclaimable page cache) once five of its runs have a trusted one. Off, the default, reads the usage peaks exactly as before; the working set is still recorded. Do not turn it on yet: three findings about switching a job's history (untrusted heavy runs dropped after a switch, distrust arriving after the 15-minute window, and jobs identified by display name) are open.",
+		Summary: "Whether booking, history raise and profiles read a job's working-set peaks (its memory less reclaimable page cache) once five of its runs are measured: a trusted peak with the agent's final verdict on its coverage, of a job identified by its workflow file. Off, the default, reads the usage peaks exactly as before; the working set is still recorded. On, a switched job's other runs keep their usage peaks; only records older than every measured run are dropped. Leave it off until the operator has reviewed the history recorded since 1.4.1-vision.11, which marked every earlier peak untrusted.",
 	},
 	{
 		Key: "scheduler.working_set_sampling", Label: "Working-set sampling", Env: "ZOOMIES_WORKING_SET_SAMPLING", Kind: KindEnum, Scope: ScopeInstance, Live: true,

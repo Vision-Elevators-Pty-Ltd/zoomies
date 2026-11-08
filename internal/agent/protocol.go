@@ -546,8 +546,13 @@ type TaskResult struct {
 	Doctor *hosttune.Report `json:"doctor,omitempty"`
 	// Stuck is what a TaskUpdateAgent found wrong with the update helper, and
 	// what was done about it. Additive, like Doctor.
-	Stuck  *UpdateStuck `json:"update_stuck,omitempty"`
-	TaskID string       `json:"task_id"`
+	Stuck *UpdateStuck `json:"update_stuck,omitempty"`
+	// WorkingSet is the final working set of a runner a TaskRemoveRunner
+	// removed: its kept peak and verdict, which no runner report will carry
+	// once the runner is no longer tracked. The agent keeps it until a result
+	// carrying it is accepted. Additive, like Doctor.
+	WorkingSet *WorkingSetReport `json:"working_set,omitempty"`
+	TaskID     string            `json:"task_id"`
 	// Kind is the kind of the task this answers. The controller uses it to
 	// tell a lifecycle task that failed -- which leaves the runner unusable --
 	// from a log relay that could not be opened, which leaves it exactly as it
@@ -646,4 +651,11 @@ type WorkingSetReport struct {
 	// watched from its start. The controller never counts such a run as
 	// measured the new way.
 	Incomplete bool `json:"incomplete,omitempty"`
+	// Final says the runner's end has been judged: its container has ended,
+	// or this agent removed it, and the coverage up to that end is in
+	// Incomplete. Only a final verdict lets the controller count the run as
+	// measured the new way; an earlier report, however good, may yet be
+	// followed by a gap. Additive: an older agent never sends it, and its
+	// runs never count.
+	Final bool `json:"final,omitempty"`
 }

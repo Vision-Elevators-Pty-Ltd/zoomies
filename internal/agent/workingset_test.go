@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/eyupio/zoomies/internal/backend"
@@ -334,21 +335,49 @@ func TestEveryRunningRunnerIsReadAndHalfAPairIsNot(t *testing.T) {
 	}
 }
 
-// The controller can stop the readings live: the loop skips its rounds while
-// the heartbeat says off, and nothing else changes.
-func TestTheReadingsStopWhenTheControllerSaysSo(t *testing.T) {
-	b := &workingSetBackend{valveBackend: newValveBackend()}
-	a := workingSetSampler(t, b, 512<<20, []string{"runner"})
-	a.workingSetSamplingOff.Store(true)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _ = a.workingSetLoop(ctx); close(done) }()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	<-done
-	if got := b.reads.Load(); got != 0 {
-		t.Fatalf("%d readings with sampling off", got)
-	}
+// The controller can stop the readings live, through the heartbeat: the loop
+// skips its real 10-second ticks while the answer says off, and the next
+// heartbeat that says on resumes them (review 3 of #20, finding 7: the first
+// version of this test waited 50 ms against a 10-second ticker, and passed
+// with the off check removed).
+func TestTheReadingsStopAndResumeWhenTheControllerSaysSo(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := &workingSetBackend{valveBackend: newValveBackend()}
+		a := workingSetSampler(t, b, 512<<20, []string{"runner"})
+		tr := a.tr.(*fakeTransport)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { _ = a.workingSetLoop(ctx); close(done) }()
+		tick := func(n int) {
+			time.Sleep(time.Duration(n)*workingSetInterval + time.Second)
+			synctest.Wait()
+		}
+		say := func(off bool) {
+			tr.mu.Lock()
+			tr.beatResp.WorkingSetSamplingOff = off
+			tr.mu.Unlock()
+			if err := a.heartbeat(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		tick(1)
+		before := b.reads.Load()
+		if before != 1 {
+			t.Fatalf("first tick read %d times, want 1", before)
+		}
+		say(true)
+		tick(3)
+		if got := b.reads.Load(); got != before {
+			t.Fatalf("%d readings over three ticks with sampling off", got-before)
+		}
+		say(false)
+		tick(1)
+		if got := b.reads.Load(); got != before+1 {
+			t.Fatalf("after the controller said on: %d readings, want 1", got-before)
+		}
+		cancel()
+		<-done
+	})
 }
 
 // A slow daemon does not hold the agent's lock: reports go out while the

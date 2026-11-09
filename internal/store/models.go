@@ -895,7 +895,7 @@ func DevicePoolProblems(p *Pool, targetType TargetType) []string {
 	}
 	own := false
 	for _, l := range NormalizeLabels(p.Labels) {
-		own = own || !ImplicitLabels[l]
+		own = own || (!ImplicitLabels[l] && l != BrandLabel)
 	}
 	if !own {
 		out = append(out, "a pool that maps devices needs a label of its own (such as sa-ci-emulator) that only its jobs ask for")

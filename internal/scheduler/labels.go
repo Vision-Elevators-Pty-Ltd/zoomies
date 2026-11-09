@@ -66,13 +66,13 @@ func poolTakes(p *store.Pool, labels []string, job jobLabels) bool {
 }
 
 // asksForEveryOwnLabel reports whether a job's labels include every label of
-// the pool's that is not one every runner advertises, and whether the pool has
-// any such label at all: a device pool without one would be asked for by any
-// job, and takes none.
+// the pool's that is neither implicit nor the fleet brand, and whether the pool
+// has any such label at all: the API adds the brand to every pool, so it cannot
+// identify a device job. A device pool without its own label takes no jobs.
 func asksForEveryOwnLabel(pool, job []string) bool {
 	own := 0
 	for _, l := range pool {
-		if store.ImplicitLabels[l] {
+		if store.ImplicitLabels[l] || l == store.BrandLabel {
 			continue
 		}
 		own++

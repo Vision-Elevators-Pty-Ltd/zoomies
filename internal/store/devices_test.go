@@ -114,7 +114,7 @@ func TestAReservationOutlivesTheAgentThatReportedIt(t *testing.T) {
 // other than Default.
 func TestADevicePoolIsBoundToItsOwnJobs(t *testing.T) {
 	good := func() *Pool {
-		return &Pool{Labels: StringSlice{"self-hosted", "linux", "x64", "sa-ci-emulator"}, Ephemeral: true,
+		return &Pool{Labels: BrandLabels([]string{"self-hosted", "linux", "x64", "sa-ci-emulator"}), Ephemeral: true,
 			RunnerGroup: "emulator", RunnerSettings: RunnerSettings{Devices: []string{"/dev/kvm"}}}
 	}
 	if got := DevicePoolProblems(good(), TargetOrg); len(got) != 0 {
@@ -127,6 +127,7 @@ func TestADevicePoolIsBoundToItsOwnJobs(t *testing.T) {
 	}{
 		"not ephemeral": {func(p *Pool) { p.Ephemeral = false }, TargetOrg, "ephemeral"},
 		"no own label":  {func(p *Pool) { p.Labels = StringSlice{"self-hosted", "linux", "x64"} }, TargetOrg, "label of its own"},
+		"brand only":    {func(p *Pool) { p.Labels = BrandLabels([]string{"self-hosted", "linux", "x64"}) }, TargetOrg, "label of its own"},
 		"default group": {func(p *Pool) { p.RunnerGroup = "Default" }, TargetOrg, "runner group"},
 		"no group":      {func(p *Pool) { p.RunnerGroup = "" }, TargetOrg, "runner group"},
 		"a repository":  {func(*Pool) {}, TargetRepo, "organisation"},

@@ -798,7 +798,8 @@ Each of these is enforced, and refused where it is not met:
   otherwise; the agent refuses a device runner on a non-`none` mode too.
 - **The jobs.** Zoomies places a job on a device pool only if the job asks for
   every label of the pool's own, not just `self-hosted, linux, x64`, which match
-  any runner. GitHub, though, offers a registered runner any queued job its
+  any runner. The fleet-wide `zoomies` brand is not a pool's own label. GitHub,
+  though, offers a registered runner any queued job its
   labels satisfy, and every ephemeral runner carries `self-hosted, linux, x64`.
   So the pool's runner group must be restricted on GitHub to selected
   workflows (the emulator workflows only) and must not serve public

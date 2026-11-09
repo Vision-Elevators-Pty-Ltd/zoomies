@@ -181,7 +181,8 @@ func TestRunnersOnAHostTheirDevicePoolNoLongerTakesAreReplaced(t *testing.T) {
 // label of its own takes no job at all.
 func TestOnlyJobsAskingForTheEmulatorLabelReachTheEmulatorPool(t *testing.T) {
 	emu := kvmPool()
-	emu.Labels = store.NormalizeLabels([]string{"self-hosted", "linux", "x64", "sa-ci-emulator"})
+	// The API adds the fleet brand to every pool, including device pools.
+	emu.Labels = store.BrandLabels([]string{"self-hosted", "linux", "x64", "sa-ci-emulator"})
 	for _, tc := range []struct {
 		job  []string
 		want bool
@@ -189,6 +190,7 @@ func TestOnlyJobsAskingForTheEmulatorLabelReachTheEmulatorPool(t *testing.T) {
 		{[]string{"self-hosted", "linux", "x64"}, false},
 		{[]string{"self-hosted"}, false},
 		{[]string{"linux"}, false},
+		{[]string{store.BrandLabel}, false},
 		{[]string{"self-hosted", "linux", "x64", "sa-ci-emulator"}, true},
 		{[]string{"sa-ci-emulator"}, true},
 	} {
@@ -197,9 +199,12 @@ func TestOnlyJobsAskingForTheEmulatorLabelReachTheEmulatorPool(t *testing.T) {
 		}
 	}
 	bare := kvmPool()
-	bare.Labels = store.NormalizeLabels([]string{"self-hosted", "linux", "x64"})
+	bare.Labels = store.BrandLabels([]string{"self-hosted", "linux", "x64"})
 	if PoolMatches(bare, []string{"self-hosted", "linux", "x64"}) {
 		t.Error("a device pool with no label of its own took an ordinary job")
+	}
+	if PoolMatches(bare, []string{"self-hosted", "linux", "x64", store.BrandLabel}) {
+		t.Error("the fleet brand counted as a device pool's own label")
 	}
 	// The same pool without devices takes the ordinary job, as before.
 	general := kvmPool()

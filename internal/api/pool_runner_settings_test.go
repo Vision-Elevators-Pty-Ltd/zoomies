@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/eyupio/zoomies/internal/controller"
+	"github.com/eyupio/zoomies/internal/scheduler"
 	"github.com/eyupio/zoomies/internal/store"
 )
 
@@ -370,5 +371,31 @@ func TestADevicePoolNeedsItsOwnGroupAndLabel(t *testing.T) {
 		body["runner_settings"] = map[string]any{"devices": []string{"/dev/kvm"}}
 		mut(body)
 		h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body}).mustNotSucceed(t, name)
+	}
+}
+
+// A real create adds the fleet brand, which must not become an extra job label.
+func TestAnAPICreatedDevicePoolAcceptsItsDocumentedRunsOnLabels(t *testing.T) {
+	h := newHarness(t)
+	inst := h.installation()
+	u, _ := h.user("operator", store.RoleOperator)
+	cookie := h.session(u)
+	labels := []string{"self-hosted", "linux", "x64", "sa-ci-emulator"}
+	body := poolBody(inst.ID)
+	body["name"], body["runner_group"] = "emulator", "emulator"
+	body["labels"] = labels
+	body["host_selector"] = map[string]string{"kvm": "ok"}
+	body["runner_settings"] = map[string]any{"devices": []string{"/dev/kvm"}}
+	resp := h.do(request{method: http.MethodPost, path: "/api/v1/pools", cookie: cookie, body: body})
+	resp.mustStatus(t, http.StatusCreated, "create the emulator pool")
+	var p store.Pool
+	if err := json.Unmarshal(resp.body, &p); err != nil {
+		t.Fatal(err)
+	}
+	if !scheduler.PoolMatches(&p, labels) {
+		t.Fatalf("created pool labels %v reject the documented job labels %v", p.Labels, labels)
+	}
+	if scheduler.PoolMatches(&p, []string{"self-hosted", "linux", "x64", store.BrandLabel}) {
+		t.Fatal("the fleet brand admitted an ordinary job to the device pool")
 	}
 }

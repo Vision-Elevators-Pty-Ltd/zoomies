@@ -250,6 +250,7 @@ func (h *harness) host(name string) *store.Host {
 		Name:     name,
 		Capacity: 4,
 		Backends: store.StringSlice{"docker"},
+		Features: store.StringSlice{agent.FeatureIdleWorkerGuard},
 		Labels:   store.StringMap{},
 		OS:       "linux",
 		Arch:     "amd64",

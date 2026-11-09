@@ -139,6 +139,7 @@ func TestAFailureOnAnUnknownTaskKindLeavesTheRunnerAlone(t *testing.T) {
 	}{
 		{agent.TaskCreateRunner, true},
 		{agent.TaskStopRunner, true},
+		{agent.TaskStopIdleRunner, true},
 		{agent.TaskRemoveRunner, true},
 		{agent.TaskStreamLogs, false},
 		{agent.TaskCancelLogs, false},

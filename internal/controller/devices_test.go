@@ -210,8 +210,11 @@ func TestClearingAPoolsDevicesDrainsItsIdleRunners(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.c.lifecycleCalls.Wait()
-	if got := h.runnerByID(t, idle.ID); got.State != store.RunnerDraining {
-		t.Fatalf("the idle runner made with /dev/kvm is %s, want draining", got.State)
+	if got := h.runnerByID(t, idle.ID); got.State != store.RunnerIdle {
+		t.Fatalf("the idle runner made with /dev/kvm is %s, want it booked until an actual exit", got.State)
+	}
+	if task := h.taskOfKind(host.ID, agent.TaskStopIdleRunner); task.RunnerID != idle.ID {
+		t.Fatalf("guarded stop is for %s, want %s", task.RunnerID, idle.ID)
 	}
 }
 

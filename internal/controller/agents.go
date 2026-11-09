@@ -194,13 +194,32 @@ func taskKey(t agent.Task) string {
 	return string(t.Kind) + "|" + t.RunnerID
 }
 
+// outstanding keeps a retained idle row from spending another withdrawal in
+// each pass while its host is still inspecting or stopping it.
+func (q *taskQueue) outstanding(t agent.Task) bool {
+	key := taskKey(t)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, p := range q.pending {
+		if p.key == key {
+			return true
+		}
+	}
+	for _, f := range q.inflight {
+		if f.key == key {
+			return true
+		}
+	}
+	return false
+}
+
 // requeueAfter is how long a task of this kind may be in flight before the
 // controller assumes the agent died with it.
 func requeueAfter(kind agent.TaskKind) time.Duration {
 	switch kind {
 	case agent.TaskCreateRunner:
 		return createLease
-	case agent.TaskStopRunner:
+	case agent.TaskStopRunner, agent.TaskStopIdleRunner:
 		return stopLease
 	case agent.TaskRemoveRunner:
 		return removeLease
@@ -400,7 +419,7 @@ func (q *taskQueue) withdraw(match func(agent.Task) bool, inFlight bool) int {
 // name.
 func lifecycleTask(kind agent.TaskKind) bool {
 	switch kind {
-	case agent.TaskCreateRunner, agent.TaskStopRunner, agent.TaskRemoveRunner:
+	case agent.TaskCreateRunner, agent.TaskStopRunner, agent.TaskStopIdleRunner, agent.TaskRemoveRunner:
 		return true
 	}
 	return false
@@ -1480,6 +1499,14 @@ func (c *Controller) ReportResult(ctx context.Context, hostID string, res agent.
 		c.noteImagePull(ctx, hostID, r.PoolID, image, "start", res.OK, res.Fault, res.Error)
 	}
 
+	if kind == agent.TaskStopIdleRunner && (!res.OK || (res.State != "" && res.State != store.RunnerRemoved)) {
+		// Only an actual exit can release this booking. A failed stop, lost
+		// attempt or unexpected state on a success result is not that evidence.
+		c.log.Info("an idle stop was not confirmed; the runner remains booked",
+			"runner", r.ID, "task", res.TaskID, "state", res.State, "error", res.Error)
+		return nil
+	}
+
 	if !res.OK && res.CleanupPending && kind == agent.TaskRemoveRunner {
 		// The daemon is still carrying out a removal of this runner's
 		// workload, and finishes it without being asked again. Nothing is
@@ -1542,7 +1569,7 @@ func (c *Controller) publishRunnerByID(ctx context.Context, id string) {
 // cleansUp reports whether this task kind is one whose success means there is
 // less of the runner left on the host than there was.
 func cleansUp(kind agent.TaskKind) bool {
-	return kind == agent.TaskStopRunner || kind == agent.TaskRemoveRunner
+	return kind == agent.TaskStopRunner || kind == agent.TaskStopIdleRunner || kind == agent.TaskRemoveRunner
 }
 
 // noteCleanupFailure records on the runner's row that taking it away did not

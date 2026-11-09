@@ -912,6 +912,45 @@ func (c *APIClient) ContainerUpdate(ctx context.Context, id string, cfg UpdateCo
 	return c.do(ctx, http.MethodPost, "/containers/"+id+"/update", nil, cfg, nil)
 }
 
+// RunnerWorkerPresent requests process names and PIDs: arguments can carry secrets.
+// Docker needs the PID column to identify the container's processes. A bounded,
+// recognised process table is required before absence is trusted.
+func (c *APIClient) RunnerWorkerPresent(ctx context.Context, id string) (bool, error) {
+	resp, err := c.doRaw(ctx, http.MethodGet, "/containers/"+url.PathEscape(id)+"/top", url.Values{"ps_args": {"-eo pid,comm"}}, nil, nil, false)
+	if err != nil {
+		return false, errors.New("docker api: cannot inspect runner process names")
+	}
+	defer resp.Body.Close()
+	const limit = 1 << 20
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil || len(raw) > limit {
+		return false, errors.New("docker api: runner process table is unreadable or too large")
+	}
+	var table struct {
+		Titles    []string   `json:"Titles"`
+		Processes [][]string `json:"Processes"`
+	}
+	if err := json.Unmarshal(raw, &table); err != nil || len(table.Titles) != 2 ||
+		!strings.EqualFold(strings.TrimSpace(table.Titles[0]), "PID") ||
+		!strings.EqualFold(strings.TrimSpace(table.Titles[1]), "COMMAND") || len(table.Processes) == 0 {
+		return false, errors.New("docker api: runner process table has an unrecognised shape")
+	}
+	present := false
+	for _, row := range table.Processes {
+		if len(row) != 2 || strings.TrimSpace(row[1]) == "" || strings.ContainsAny(strings.TrimSpace(row[1]), " /\t\r\n") {
+			return false, errors.New("docker api: runner process table has an incomplete row")
+		}
+		pid, err := strconv.ParseUint(strings.TrimSpace(row[0]), 10, 32)
+		if err != nil || pid == 0 {
+			return false, errors.New("docker api: runner process table has an invalid PID")
+		}
+		if strings.TrimSpace(row[1]) == "Runner.Worker" {
+			present = true
+		}
+	}
+	return present, nil
+}
+
 // ContainerInspect returns the full state of one container.
 func (c *APIClient) ContainerInspect(ctx context.Context, id string) (*ContainerInspect, error) {
 	var out ContainerInspect

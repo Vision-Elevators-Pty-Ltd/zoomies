@@ -57,7 +57,7 @@ func TestADrainIsRefusedWhenGitHubHasGivenTheRunnerAJobNothingHereHasSeen(t *tes
 	if after.State != store.RunnerIdle {
 		t.Fatalf("runner = %s, want it left idle for the next sweep to find its job", after.State)
 	}
-	if h.hasTaskOfKind(host.ID, agent.TaskStopRunner) {
+	if h.hasTaskOfKind(host.ID, agent.TaskStopRunner) || h.hasTaskOfKind(host.ID, agent.TaskStopIdleRunner) {
 		t.Fatal("a stop was sent to a runner GitHub says is running a job")
 	}
 	if !h.registered(after.Name) {
@@ -76,10 +76,10 @@ func TestADrainThatGoesAheadLeavesNoRegistrationToAssignAJobTo(t *testing.T) {
 	if h.registered(after.Name) {
 		t.Fatal("the runner was stopped while GitHub could still assign it a job")
 	}
-	if after.State != store.RunnerDraining {
-		t.Fatalf("runner = %s, want it draining", after.State)
+	if after.State != store.RunnerIdle {
+		t.Fatalf("runner = %s, want it booked until an actual exit", after.State)
 	}
-	if !h.hasTaskOfKind(host.ID, agent.TaskStopRunner) {
+	if !h.hasTaskOfKind(host.ID, agent.TaskStopIdleRunner) {
 		t.Fatal("nothing was asked to stop the drained runner")
 	}
 }
@@ -95,7 +95,7 @@ func TestADrainWaitsWhenGitHubCannotBeAsked(t *testing.T) {
 	if after.State != store.RunnerIdle {
 		t.Fatalf("runner = %s, want it left idle until GitHub answers", after.State)
 	}
-	if h.hasTaskOfKind(host.ID, agent.TaskStopRunner) {
+	if h.hasTaskOfKind(host.ID, agent.TaskStopRunner) || h.hasTaskOfKind(host.ID, agent.TaskStopIdleRunner) {
 		t.Fatal("a stop was sent to a runner whose registration could not be withdrawn")
 	}
 	if !h.registered(after.Name) {
@@ -157,7 +157,7 @@ func TestAPassWithdrawsOnlyAFewRegistrationsAndLeavesTheRestForTheNext(t *testin
 	draining := func() int {
 		n := 0
 		for _, id := range ids {
-			if h.runnerByID(t, id).State == store.RunnerDraining {
+			if h.c.queues.get(host.ID).outstanding(agent.Task{Kind: agent.TaskStopIdleRunner, RunnerID: id}) {
 				n++
 			}
 		}

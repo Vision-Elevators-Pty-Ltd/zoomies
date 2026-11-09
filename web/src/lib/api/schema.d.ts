@@ -12953,10 +12953,10 @@ export interface components {
             memory_limit?: number;
         };
         /**
-         * @description `update_agent` is queued only for a host whose agent advertises the `self-update` feature; an older agent would report it failed as an unknown kind.
+         * @description `update_agent` is queued only for a host whose agent advertises the `self-update` feature; an older agent would report it failed as an unknown kind. `stop_idle_runner` requires `idle-worker-guard` and refuses to stop a workload unless the host confirms Runner.Worker is absent. Failed or unconfirmed idle stops retain their live runner row and capacity booking until an actual exit.
          * @enum {string}
          */
-        AgentTaskKind: "create_runner" | "stop_runner" | "remove_runner" | "stream_logs" | "cancel_logs" | "prewarm_image" | "fill_tool_cache" | "update_agent";
+        AgentTaskKind: "create_runner" | "stop_runner" | "stop_idle_runner" | "remove_runner" | "stream_logs" | "cancel_logs" | "prewarm_image" | "fill_tool_cache" | "update_agent";
         /** @description One unit of work for an agent. Tasks are idempotent; the controller may redeliver one after a restart. */
         AgentTask: {
             id: string;

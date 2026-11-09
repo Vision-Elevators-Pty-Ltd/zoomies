@@ -168,6 +168,11 @@ func (c *Controller) sweepTasks(ctx context.Context, now time.Time) {
 				}
 				continue
 			}
+			if task.Kind == agent.TaskStopIdleRunner {
+				// Losing an idle stop is not evidence that its workload exited.
+				// Retain the booking; the scheduler can retry the guarded task.
+				continue
+			}
 			// A dropped create is noticed by the runner's provision timeout,
 			// which says so on the Runners page. A dropped stop is noticed by
 			// nothing: the runner would sit in draining for ever, counted

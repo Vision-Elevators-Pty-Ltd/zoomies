@@ -25,6 +25,10 @@ const ProtocolVersion = 1
 // claiming a live quota moved when that agent could not understand the order.
 const FeatureElasticCPU = "elastic-cpu"
 
+// FeatureIdleWorkerGuard means scheduler idle stops refuse an active or
+// unmeasurable Runner.Worker. Older agents must never receive that task.
+const FeatureIdleWorkerGuard = "idle-worker-guard"
+
 // FeatureElasticMemory is advertised by an agent that can lend memory to a
 // runner while its job runs: it watches the runner's memory itself and raises
 // the limit of a live container, within the rules each heartbeat hands it. An
@@ -465,6 +469,9 @@ const (
 	// TaskStopRunner asks the agent to let the runner finish its current job
 	// and then exit. This is what a drain becomes on the host.
 	TaskStopRunner TaskKind = "stop_runner"
+	// TaskStopIdleRunner stops only after the backend confirms no Runner.Worker.
+	// A refusal leaves the runner live and its capacity booked.
+	TaskStopIdleRunner TaskKind = "stop_idle_runner"
 	// TaskRemoveRunner tears the workload down immediately.
 	TaskRemoveRunner TaskKind = "remove_runner"
 	// TaskStreamLogs opens an outbound log relay for a UI viewer.

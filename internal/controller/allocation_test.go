@@ -22,7 +22,7 @@ func (h *harness) measuredHost(name string, cpus int, memoryMB int64, capacity i
 		},
 		// A measured host is one a current agent reported, and a current agent divides a
 		// docker-in-docker slot by the pool's shares.
-		Features:      store.StringSlice{agent.FeatureDaemonShare},
+		Features:      store.StringSlice{agent.FeatureDaemonShare, agent.FeatureIdleWorkerGuard},
 		Labels:        store.StringMap{},
 		OS:            "linux",
 		Arch:          "amd64",

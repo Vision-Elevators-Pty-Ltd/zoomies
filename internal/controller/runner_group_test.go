@@ -212,8 +212,11 @@ func TestInstallationProbeCreatesAndAdoptsManagedRunnerGroup(t *testing.T) {
 	if got.RunnerGroup != ManagedRunnerGroupName {
 		t.Fatalf("runner group = %q, want %q", got.RunnerGroup, ManagedRunnerGroupName)
 	}
-	if got := h.runnerByID(t, idle.ID).State; got != store.RunnerDraining {
-		t.Fatalf("idle legacy runner state = %q, want draining so its replacement joins the managed group", got)
+	if got := h.runnerByID(t, idle.ID).State; got != store.RunnerIdle {
+		t.Fatalf("idle legacy runner state = %q, want it booked until an actual exit", got)
+	}
+	if task := h.taskOfKind(host.ID, agent.TaskStopIdleRunner); task.RunnerID != idle.ID {
+		t.Fatalf("guarded stop is for %s, want %s", task.RunnerID, idle.ID)
 	}
 	if got := h.runnerByID(t, busy.ID).State; got != store.RunnerBusy {
 		t.Fatalf("busy legacy runner state = %q, want busy so its job can finish", got)

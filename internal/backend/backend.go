@@ -446,6 +446,12 @@ type Backend interface {
 	List(ctx context.Context) ([]Workload, error)
 }
 
+// WorkerProber inspects the runner workload without executing a command in it.
+// An unsupported or failed inspection is never evidence that it is idle.
+type WorkerProber interface {
+	RunnerWorkerPresent(context.Context, Handle) (bool, error)
+}
+
 // TimedCreator is implemented by backends that expose creation timing. It is
 // optional so third-party and older backends retain the explicit unavailable
 // path rather than fabricating an image-pull duration.

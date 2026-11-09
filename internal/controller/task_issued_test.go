@@ -115,7 +115,7 @@ func TestFirstCreateDeliverySurvivesRetriesAndRemoval(t *testing.T) {
 	if first == nil || !first.Equal(batch.Tasks[0].IssuedAt.Truncate(time.Millisecond)) {
 		t.Fatalf("first delivery = %v, want %v", first, batch.Tasks[0].IssuedAt)
 	}
-	for _, kind := range []agent.TaskKind{agent.TaskCreateRunner, agent.TaskStopRunner, agent.TaskRemoveRunner} {
+	for _, kind := range []agent.TaskKind{agent.TaskCreateRunner, agent.TaskStopRunner, agent.TaskStopIdleRunner, agent.TaskRemoveRunner} {
 		h.advance(time.Minute)
 		issued := h.c.Now()
 		h.c.stampIssued(h.ctx, []agent.Task{{Kind: kind, RunnerID: r.ID, IssuedAt: issued}})

@@ -369,6 +369,13 @@ func (c *Controller) apply(ctx context.Context, snap scheduler.Snapshot, plan sc
 		}
 	}
 
+	runnerHosts := make(map[string]string, len(snap.Runners))
+	for _, runners := range snap.Runners {
+		for _, r := range runners {
+			runnerHosts[r.ID] = r.HostID
+		}
+	}
+
 	type changes struct{ created, drained int }
 	// Each scheduler drain asks GitHub a question before it stops anything, and
 	// this loop holds reconcileMu throughout, so the number asked per pass is
@@ -410,6 +417,9 @@ func (c *Controller) apply(ctx context.Context, snap scheduler.Snapshot, plan sc
 			}
 			n.created++
 		case scheduler.ActionDrain:
+			if c.queues.get(runnerHosts[a.RunnerID]).outstanding(agent.Task{Kind: agent.TaskStopIdleRunner, RunnerID: a.RunnerID}) {
+				continue
+			}
 			if withdrawals >= maxWithdrawalsPerPass {
 				c.log.Debug("left a drain for the next pass so this one does not hold the scheduling lock on GitHub",
 					"runner", a.RunnerID, "pool", a.PoolName)
@@ -948,7 +958,8 @@ func (c *Controller) drainRunnerID(ctx context.Context, id, reason string, pool 
 	return err
 }
 
-// drainRunner moves a runner to draining and asks its host to stop it.
+// drainRunner asks a host to stop a runner. A scheduler idle stop retains
+// the live row until the host confirms an actual workload exit.
 //
 // unlessBusy is for the scheduler's own drains, which were decided for a runner
 // that was not running a job. Its registration is withdrawn from GitHub first,
@@ -961,6 +972,16 @@ func (c *Controller) drainRunner(ctx context.Context, r *store.Runner, reason st
 	if !c.mayAct() {
 		return nil, errors.New("controller authority is paused; retry after recovery or lease renewal")
 	}
+	guardIdle := unlessBusy && r.State == store.RunnerIdle
+	if guardIdle {
+		h, err := c.st.GetHost(ctx, r.HostID)
+		if err != nil {
+			return nil, err
+		}
+		if !h.Supports(agent.FeatureIdleWorkerGuard) {
+			return nil, errors.New("idle stop requires a host with the idle Worker guard; upgrade its agent first")
+		}
+	}
 	transition := c.st.TransitionRunner
 	if unlessBusy {
 		if err := c.withdrawRegistration(ctx, r, pool); err != nil {
@@ -968,13 +989,20 @@ func (c *Controller) drainRunner(ctx context.Context, r *store.Runner, reason st
 		}
 		transition = c.st.TransitionRunnerUnlessBusy
 	}
-	updated, err := transition(ctx, r.ID, store.RunnerDraining, reason)
+	state, kind := store.RunnerDraining, agent.TaskStopRunner
+	if guardIdle {
+		// A draining row can time out into failure and removal even when the
+		// host refused to stop an active Worker. An idle row keeps its booking
+		// and is retried after failure, lease expiry or a controller restart.
+		state, kind = store.RunnerIdle, agent.TaskStopIdleRunner
+	}
+	updated, err := transition(ctx, r.ID, state, reason)
 	if err != nil {
 		return nil, err
 	}
 	c.publishRunner(ctx, events.KindRunnerUpdated, updated)
 	c.enqueueLifecycle(ctx, r.HostID, agent.Task{
-		Kind:        agent.TaskStopRunner,
+		Kind:        kind,
 		RunnerID:    r.ID,
 		Backend:     c.backendKind(ctx, r, pool),
 		StopTimeout: agent.DefaultStopTimeout,

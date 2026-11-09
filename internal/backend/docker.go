@@ -2061,6 +2061,12 @@ func (b *DockerBackend) Logs(ctx context.Context, h Handle, opts LogOptions) (io
 	})
 }
 
+// RunnerWorkerPresent checks the runner container on its own daemon, including
+// remote Docker and Podman daemons; the agent host's process list is irrelevant.
+func (b *DockerBackend) RunnerWorkerPresent(ctx context.Context, h Handle) (bool, error) {
+	return b.api.RunnerWorkerPresent(ctx, string(h))
+}
+
 // Stop asks the runner to finish its job and exit, then kills what is left.
 func (b *DockerBackend) Stop(ctx context.Context, h Handle, timeout time.Duration) error {
 	if timeout <= 0 {

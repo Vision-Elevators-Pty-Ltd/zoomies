@@ -1660,7 +1660,7 @@ func validateTask(task Task) error {
 		if err := task.Spec.Validate(); err != nil {
 			return fmt.Errorf("create_runner task for runner %s has an unusable spec: %w", task.RunnerID, err)
 		}
-	case TaskStopRunner, TaskRemoveRunner:
+	case TaskStopRunner, TaskStopIdleRunner, TaskRemoveRunner:
 		if task.RunnerID == "" {
 			return fmt.Errorf("%s task has no runner ID", task.Kind)
 		}
@@ -1709,7 +1709,7 @@ func (a *Agent) runTask(ctx context.Context, task Task, release func()) {
 	switch task.Kind {
 	case TaskCreateRunner:
 		a.handleCreate(ctx, task, release)
-	case TaskStopRunner:
+	case TaskStopRunner, TaskStopIdleRunner:
 		a.handleStop(ctx, task, release)
 	case TaskRemoveRunner:
 		a.handleRemove(ctx, task, release)
@@ -1956,6 +1956,30 @@ func (a *Agent) handleStop(ctx context.Context, task Task, release func()) {
 		release()
 		a.report(ctx, TaskResult{TaskID: task.ID, Kind: task.Kind, RunnerID: task.RunnerID, OK: true, State: store.RunnerRemoved, CompletedAt: a.now()})
 		return
+	}
+
+	if task.Kind == TaskStopIdleRunner {
+		probe, supported := b.(backend.WorkerProber)
+		var probeErr error
+		present := false
+		if supported {
+			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			present, probeErr = probe.RunnerWorkerPresent(pctx, handle)
+			if probeErr == nil {
+				probeErr = pctx.Err()
+			}
+			cancel()
+		}
+		if !supported || probeErr != nil || present {
+			reason := "the backend cannot confirm that Runner.Worker is absent"
+			if present {
+				reason = "Runner.Worker is still running"
+			}
+			release()
+			a.report(ctx, TaskResult{TaskID: task.ID, Kind: task.Kind, RunnerID: task.RunnerID,
+				OK: false, Error: "idle stop refused: " + reason, CompletedAt: a.now()})
+			return
+		}
 	}
 
 	timeout := task.StopTimeout
@@ -2536,7 +2560,7 @@ func taskRank(kind TaskKind) int {
 	switch kind {
 	case TaskCreateRunner:
 		return 1
-	case TaskStopRunner:
+	case TaskStopRunner, TaskStopIdleRunner:
 		return 2
 	case TaskRemoveRunner:
 		return 3

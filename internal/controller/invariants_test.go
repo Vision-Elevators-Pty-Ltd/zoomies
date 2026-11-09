@@ -57,6 +57,7 @@ func TestEveryTaskLeaseOutlastsTheWorkItCovers(t *testing.T) {
 		// The controller hands the agent DefaultStopTimeout on every stop
 		// (reconcile.go), and the agent adds StopMargin to it.
 		{agent.TaskStopRunner, stopLease, agent.DefaultStopTimeout + agent.StopMargin},
+		{agent.TaskStopIdleRunner, stopLease, agent.DefaultStopTimeout + agent.StopMargin + 5*time.Second},
 		{agent.TaskRemoveRunner, removeLease, agent.RemoveTimeout},
 		// A check is bounded by the monitor's own run timeout on the agent.
 		{agent.TaskCheckHost, hostCheckLease, hosttune.MonitorRunTimeout},

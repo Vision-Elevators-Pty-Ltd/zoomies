@@ -220,8 +220,8 @@ func TestSchedulerDrainsIdleRunnersAndNeverBusyOnes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRunner: %v", err)
 	}
-	if after.State != store.RunnerDraining {
-		t.Fatalf("idle runner state = %q, want %q", after.State, store.RunnerDraining)
+	if after.State != store.RunnerIdle {
+		t.Fatalf("idle runner state = %q, want it booked until an actual exit", after.State)
 	}
 	stillBusy, err := h.st.GetRunner(h.ctx, busy.ID)
 	if err != nil {
@@ -233,7 +233,7 @@ func TestSchedulerDrainsIdleRunnersAndNeverBusyOnes(t *testing.T) {
 
 	var stopped []string
 	for _, task := range h.tasksFor(host.ID) {
-		if task.Kind == agent.TaskStopRunner {
+		if task.Kind == agent.TaskStopIdleRunner {
 			stopped = append(stopped, task.RunnerID)
 		}
 	}
@@ -913,7 +913,7 @@ func TestAPlannedDrainIsSkippedWhenTheRunnerHasSinceTakenAJob(t *testing.T) {
 		t.Fatalf("runner = %s with job %q, want it left busy with %s: the drain would have killed a job that had just started",
 			after.State, after.CurrentJobID, job.ID)
 	}
-	if h.hasTaskOfKind(host.ID, agent.TaskStopRunner) {
+	if h.hasTaskOfKind(host.ID, agent.TaskStopRunner) || h.hasTaskOfKind(host.ID, agent.TaskStopIdleRunner) {
 		t.Error("a stop task was queued for a runner that had taken a job")
 	}
 	evs, err := h.st.ListScalingEvents(h.ctx, pool.ID, 10)

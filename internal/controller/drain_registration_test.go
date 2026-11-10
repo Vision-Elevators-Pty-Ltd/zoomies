@@ -180,3 +180,53 @@ func TestAPassWithdrawsOnlyAFewRegistrationsAndLeavesTheRestForTheNext(t *testin
 		t.Fatalf("after a second pass %d runners are draining, want all %d", got, total)
 	}
 }
+
+// An idle stop is refused for a host whose agent has no Worker guard before
+// GitHub is asked anything, so the refusal must not spend the pass's
+// withdrawal budget. Otherwise a handful of idle runners on not-yet-upgraded
+// agents, decided again every pass, would leave no budget for a guarded
+// host's drain after them, and that drain would never be issued.
+func TestRefusedLegacyIdleDrainsDoNotStarveAGuardedHostsDrain(t *testing.T) {
+	h := newHarness(t)
+	_, pool, oldHost := h.fleet()
+	oldHost.Features = nil
+	if err := h.st.SetHostReported(h.ctx, oldHost); err != nil {
+		t.Fatal(err)
+	}
+	guarded := h.host("guarded-emulator")
+	var actions []scheduler.Action
+	legacy := make([]*store.Runner, 0, maxWithdrawalsPerPass)
+	for range maxWithdrawalsPerPass {
+		r := h.runnerRow(pool, oldHost, store.RunnerIdle)
+		h.gh.AddRunner(r.Name, pool.Labels)
+		legacy = append(legacy, r)
+		actions = append(actions, scheduler.Action{Kind: scheduler.ActionDrain, PoolID: pool.ID, RunnerID: r.ID, Reason: "idle surplus"})
+	}
+	target := h.runnerRow(pool, guarded, store.RunnerIdle)
+	h.gh.AddRunner(target.Name, pool.Labels)
+	actions = append(actions, scheduler.Action{Kind: scheduler.ActionDrain, PoolID: pool.ID, RunnerID: target.ID, Reason: "idle surplus"})
+
+	snap, err := h.c.snapshot(h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.c.apply(h.ctx, snap, scheduler.Plan{Actions: actions})
+
+	if !h.c.queues.get(guarded.ID).outstanding(agent.Task{Kind: agent.TaskStopIdleRunner, RunnerID: target.ID}) {
+		t.Fatal("refused idle drains on an unguarded host spent the pass's budget and starved the guarded host's drain")
+	}
+	if h.registered(target.Name) {
+		t.Fatal("the guarded runner was asked to stop while GitHub could still assign it a job")
+	}
+	if tasks := h.tasksFor(oldHost.ID); len(tasks) != 0 {
+		t.Fatalf("the unguarded host was given tasks: %+v", tasks)
+	}
+	for _, r := range legacy {
+		if !h.registered(r.Name) {
+			t.Fatalf("the registration of %s was withdrawn although its host cannot guard the stop", r.Name)
+		}
+		if got := h.runnerByID(t, r.ID); got.State != store.RunnerIdle {
+			t.Fatalf("runner %s = %s, want it left idle", r.Name, got.State)
+		}
+	}
+}

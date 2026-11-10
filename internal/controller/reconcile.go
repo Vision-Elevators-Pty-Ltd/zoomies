@@ -420,13 +420,26 @@ func (c *Controller) apply(ctx context.Context, snap scheduler.Snapshot, plan sc
 			if c.queues.get(runnerHosts[a.RunnerID]).outstanding(agent.Task{Kind: agent.TaskStopIdleRunner, RunnerID: a.RunnerID}) {
 				continue
 			}
+			r, err := c.st.GetRunner(ctx, a.RunnerID)
+			if err != nil {
+				c.logRunnerAction("drain", a, err)
+				continue
+			}
+			// A drain the host's agent cannot guard is refused before GitHub
+			// is asked anything, so it spends none of the budget: otherwise
+			// a few idle runners on agents not yet upgraded, decided again
+			// every pass, would starve every guarded drain planned after them.
+			if err := c.idleStopUnguarded(ctx, r, true); err != nil {
+				c.logRunnerAction("drain", a, err)
+				continue
+			}
 			if withdrawals >= maxWithdrawalsPerPass {
 				c.log.Debug("left a drain for the next pass so this one does not hold the scheduling lock on GitHub",
 					"runner", a.RunnerID, "pool", a.PoolName)
 				continue
 			}
 			withdrawals++
-			if err := c.drainRunnerID(ctx, a.RunnerID, a.Reason, pool); err != nil {
+			if _, err := c.drainRunner(ctx, r, a.Reason, pool, true); err != nil {
 				c.logRunnerAction("drain", a, err)
 				continue
 			}
@@ -973,14 +986,8 @@ func (c *Controller) drainRunner(ctx context.Context, r *store.Runner, reason st
 		return nil, errors.New("controller authority is paused; retry after recovery or lease renewal")
 	}
 	guardIdle := unlessBusy && r.State == store.RunnerIdle
-	if guardIdle {
-		h, err := c.st.GetHost(ctx, r.HostID)
-		if err != nil {
-			return nil, err
-		}
-		if !h.Supports(agent.FeatureIdleWorkerGuard) {
-			return nil, errors.New("idle stop requires a host with the idle Worker guard; upgrade its agent first")
-		}
+	if err := c.idleStopUnguarded(ctx, r, unlessBusy); err != nil {
+		return nil, err
 	}
 	transition := c.st.TransitionRunner
 	if unlessBusy {
@@ -1009,6 +1016,23 @@ func (c *Controller) drainRunner(ctx context.Context, r *store.Runner, reason st
 	})
 	c.log.Info("draining a runner", "runner", r.ID, "name", r.Name, "reason", reason)
 	return updated, nil
+}
+
+// idleStopUnguarded refuses a scheduler idle stop for a runner whose host's
+// agent cannot refuse it while a Worker is running. It touches neither GitHub
+// nor the row, so a refusal leaves everything as it was for a later pass.
+func (c *Controller) idleStopUnguarded(ctx context.Context, r *store.Runner, unlessBusy bool) error {
+	if !unlessBusy || r.State != store.RunnerIdle {
+		return nil
+	}
+	h, err := c.st.GetHost(ctx, r.HostID)
+	if err != nil {
+		return err
+	}
+	if !h.Supports(agent.FeatureIdleWorkerGuard) {
+		return errors.New("idle stop requires a host with the idle Worker guard; upgrade its agent first")
+	}
+	return nil
 }
 
 // withdrawRegistration takes a runner's registration off GitHub before the

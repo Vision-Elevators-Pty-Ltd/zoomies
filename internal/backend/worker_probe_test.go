@@ -12,26 +12,37 @@ func TestWorkerAbsenceRequiresARecognisedBoundedProcessTable(t *testing.T) {
 		name      string
 		body      string
 		status    int
+		header    http.Header
 		present   bool
 		wantError bool
 	}{
-		{"worker present", `{"Titles":["PID","COMMAND"],"Processes":[["1","Runner.Listener"],["2","Runner.Worker"]]}`, 200, true, false},
-		{"worker absent", `{"Titles":["PID","COMMAND"],"Processes":[["1","Runner.Listener"],["2","bash"]]}`, 200, false, false},
-		{"probe refused", `{"message":"sensitive daemon detail"}`, 500, false, true},
-		{"unsupported", `{"message":"not implemented"}`, 404, false, true},
-		{"malformed", `{`, 200, false, true},
-		{"wrong columns", `{"Titles":["COMMAND"],"Processes":[["Runner.Listener"]]}`, 200, false, true},
-		{"arguments instead of names", `{"Titles":["PID","COMMAND"],"Processes":[["1","/runner/Runner.Worker --secret hidden"]]}`, 200, false, true},
-		{"empty table", `{"Titles":["PID","COMMAND"],"Processes":[]}`, 200, false, true},
-		{"incomplete row", `{"Titles":["PID","COMMAND"],"Processes":[["1","Runner.Listener"],[]]}`, 200, false, true},
-		{"invalid PID", `{"Titles":["PID","COMMAND"],"Processes":[["unknown","Runner.Listener"]]}`, 200, false, true},
-		{"oversized", strings.Repeat(" ", (1<<20)+1), 200, false, true},
+		{"worker present", `{"Titles":["PID","COMMAND"],"Processes":[["1","Runner.Listener"],["2","Runner.Worker"]]}`, 200, nil, true, false},
+		// A partial response is a subset of the table, which can omit the very
+		// row that proves a Worker is running: it is never proof of absence.
+		{"HTTP 206 partial table", `{"Titles":["PID","COMMAND"],"Processes":[["1","Runner.Listener"]]}`, 206, nil, false, true},
+		{"HTTP 200 with a Content-Range", `{"Titles":["PID","COMMAND"],"Processes":[["1","Runner.Listener"]]}`, 200, http.Header{"Content-Range": {"bytes 0-61/4096"}}, false, true},
+		{"other success status", `{"Titles":["PID","COMMAND"],"Processes":[["1","Runner.Listener"]]}`, 203, nil, false, true},
+		{"worker absent", `{"Titles":["PID","COMMAND"],"Processes":[["1","Runner.Listener"],["2","bash"]]}`, 200, nil, false, false},
+		{"probe refused", `{"message":"sensitive daemon detail"}`, 500, nil, false, true},
+		{"unsupported", `{"message":"not implemented"}`, 404, nil, false, true},
+		{"malformed", `{`, 200, nil, false, true},
+		{"wrong columns", `{"Titles":["COMMAND"],"Processes":[["Runner.Listener"]]}`, 200, nil, false, true},
+		{"arguments instead of names", `{"Titles":["PID","COMMAND"],"Processes":[["1","/runner/Runner.Worker --secret hidden"]]}`, 200, nil, false, true},
+		{"empty table", `{"Titles":["PID","COMMAND"],"Processes":[]}`, 200, nil, false, true},
+		{"incomplete row", `{"Titles":["PID","COMMAND"],"Processes":[["1","Runner.Listener"],[]]}`, 200, nil, false, true},
+		{"invalid PID", `{"Titles":["PID","COMMAND"],"Processes":[["unknown","Runner.Listener"]]}`, 200, nil, false, true},
+		{"oversized", strings.Repeat(" ", (1<<20)+1), 200, nil, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeEngine(t, map[string]http.HandlerFunc{
 				"GET " + v + "/containers/c1/top": func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Query().Get("ps_args") != "-eo pid,comm" {
 						t.Error("probe requested arguments instead of process names")
+					}
+					for k, vals := range tc.header {
+						for _, val := range vals {
+							w.Header().Add(k, val)
+						}
 					}
 					w.WriteHeader(tc.status)
 					_, _ = w.Write([]byte(tc.body))

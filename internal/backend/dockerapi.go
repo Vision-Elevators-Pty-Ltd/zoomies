@@ -921,6 +921,13 @@ func (c *APIClient) RunnerWorkerPresent(ctx context.Context, id string) (bool, e
 		return false, errors.New("docker api: cannot inspect runner process names")
 	}
 	defer resp.Body.Close()
+	// Only a complete answer can prove absence. doRaw lets every status below
+	// 400 through, so a 206 -- or any response describing itself as a range --
+	// would otherwise be read as the whole table, and a subset that leaves out
+	// the Worker's row looks exactly like a runner with no Worker.
+	if resp.StatusCode != http.StatusOK || len(resp.Header.Values("Content-Range")) > 0 {
+		return false, errors.New("docker api: runner process table is not a complete response")
+	}
 	const limit = 1 << 20
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil || len(raw) > limit {

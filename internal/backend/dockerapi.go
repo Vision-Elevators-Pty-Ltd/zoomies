@@ -922,7 +922,7 @@ func (c *APIClient) RunnerWorkerPresent(ctx context.Context, id string) (bool, e
 	}
 	defer resp.Body.Close()
 	// Only a complete answer can prove absence. doRaw lets every status below
-	// 400 through, so a 206 -- or any response describing itself as a range --
+	// 400 through, so a 206 (or any response describing itself as a range)
 	// would otherwise be read as the whole table, and a subset that leaves out
 	// the Worker's row looks exactly like a runner with no Worker.
 	if resp.StatusCode != http.StatusOK || len(resp.Header.Values("Content-Range")) > 0 {

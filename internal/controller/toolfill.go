@@ -108,7 +108,7 @@ func (c *Controller) toolFillSpec(ctx context.Context, p *store.Pool) (backend.S
 		PoolName:   p.Name,
 		Image:      c.RunnerImage(p),
 		PullPolicy: p.PullPolicy,
-		Env:        runnerEnv(c.cfg().Runners, p),
+		Env:        c.poolRunnerEnv(p),
 		Cache:      p.Cache,
 		Repository: firstNonEmpty(strings.TrimSpace(p.Cache.Repository), target),
 		Network:    c.cfg().Agent.Network,

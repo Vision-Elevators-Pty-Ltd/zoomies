@@ -2007,6 +2007,26 @@ the pools API answers a `422` on `env` when one of those names is set or
 changed; a pool that already stores one is not refused for an unrelated edit, but
 its value cannot be changed.
 
+#### Keeping a credential out of the pool: `secret-file:`
+
+A value typed into a pool's `env` is stored in the database in the clear and is
+returned to every operator by the pools API. A credential a pool's jobs need,
+such as a pull-only registry password, can instead be written as
+`secret-file:NAME`. The controller then reads `/etc/zoomies/runner-secrets/NAME`
+on its own host each time it creates a runner, and only that runner's
+environment holds the value; the pool, the API, the export, the audit log and
+the database hold the reference. Trailing line endings are trimmed.
+
+`NAME` is a plain file name (letters, digits, `_`, `.` and `-`, not starting
+with a dot), so a pool cannot name a file outside that directory. The file must
+be readable by the controller's user and no larger than 64 KiB; keep the
+directory `root:zoomies 0750` and the files `0640`. Whatever renders the file
+(a vault sync, a configuration manager) owns the value: a rotation is a new
+file, and runners created after it get the new value with no change to any
+pool. A reference that cannot be read is left out of the runner's environment
+rather than passed on as a literal, and the controller logs an error naming the
+pool and variable, never the value.
+
 #### How a runner picks up a proxy
 
 A runner inherits `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (in both

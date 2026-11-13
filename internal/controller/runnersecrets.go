@@ -19,8 +19,8 @@ import (
 // A value of the form "secret-file:NAME" keeps the credential out of the pool
 // instead: the controller reads NAME from RunnerSecretDir on the controller's
 // own host each time it builds a runner, and only the runner's environment
-// ever holds the value. The pool -- and so the API, the export, the audit row
-// and the database -- holds the reference. Whatever renders the file (a vault
+// ever holds the value. The pool (and so the API, the export, the audit row
+// and the database) holds the reference. Whatever renders the file (a vault
 // sync, a configuration manager) owns the value, and a rotation is a new file:
 // runners created after it get the new value, without editing any pool.
 const SecretFilePrefix = "secret-file:"

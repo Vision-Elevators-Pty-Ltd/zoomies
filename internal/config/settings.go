@@ -654,7 +654,7 @@ var registry = buildRegistry([]Setting{
 	{
 		Key: "scheduler.oldest_first", Label: "Oldest job first", Env: "ZOOMIES_OLDEST_FIRST", Kind: KindEnum, Scope: ScopeInstance, Live: true,
 		Choices: []string{"on", "off"},
-		Summary: "Whether the room on a full fleet goes to the oldest waiting job first. On, each pass holds room for every pool's oldest waiting job, oldest first across all pools: where its runner fits, until it is placed; where it fits nowhere, its whole size on the host it will fit on soonest, one such reservation per machine. Younger work starts only in what is left beside those holds, so a large old job is no longer overtaken by smaller younger ones each time a little room frees. Priority still comes first. Off hands room out as before: least recently served pool first. Pool sizes, host capacity and the hosts a pool may use are the same either way.",
+		Summary: "Whether the room on a full fleet goes to the oldest waiting job first. On, each pass holds room for every pool's oldest waiting job, oldest first across all pools: where its runner fits, until it is placed; for the oldest job that fits nowhere, once it has waited two minutes, its whole size on the host it will fit on soonest (one such reservation among pools that share machines). Younger work starts only in what is left beside those holds, so a large old job is no longer overtaken by smaller younger ones each time a little room frees. Priority still comes first. Off hands room out as before: least recently served pool first. Pool sizes, host capacity and the hosts a pool may use are the same either way.",
 	},
 	{
 		Key: "scheduler.size_routing", Label: "Route jobs by size class", Env: "ZOOMIES_SIZE_ROUTING", Kind: KindEnum, Scope: ScopeInstance, Live: true,

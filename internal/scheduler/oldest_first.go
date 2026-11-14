@@ -26,10 +26,13 @@ import (
 //
 //   - a job whose runner fits somewhere has that room held for it, so a younger
 //     request served earlier in the same pass cannot take it first;
-//   - a job whose runner fits nowhere has its whole size held on the host where
-//     it will fit soonest (the smallest shortfall), at most one such hold per
-//     machine. The room there only grows as work finishes, so the job starts
-//     the pass the host has room for it.
+//   - the oldest job whose runner fits nowhere, once it has waited
+//     reserveAfter, has its whole size held on the host where it will fit
+//     soonest (the smallest shortfall). The room there only grows as work
+//     finishes, so the job starts the pass the host has room for it. Only one
+//     such job is reserved for among pools that share a machine: the
+//     reservation leaves room idle until the job fits, and a second, for a
+//     younger job, would only idle more of it.
 //
 // A younger request may still start anywhere, held hosts included, in what is
 // left after every older job's hold: backfill that cannot delay an older job.
@@ -45,6 +48,18 @@ const (
 	// recently served pool first, a pool that does not fit skipped.
 	OldestFirstOff = "off"
 )
+
+// reserveAfter is how long a job whose runner fits nowhere waits before room
+// is reserved for it. A reservation idles the room it is filling until the job
+// fits, so reserving for every job the moment it fits nowhere costs the queue
+// as a whole more than it saves the oldest: a replay of 13 Nov 2026's NL jobs
+// put the fleet's 90th-percentile wait 55 s higher with a reservation per
+// machine from the first pass, and 13 s higher with one reservation after two
+// minutes, which still cut the longest wait from 773 s to 567 s and the
+// merge-queue runs' longest job wait from a mean of 162 s to 139 s. A job that fits
+// somewhere has its room held at once whatever its age: that costs nothing, it
+// is placed in the same pass.
+const reserveAfter = 2 * time.Minute
 
 // OldestFirstModes is every value scheduler.oldest_first takes.
 var OldestFirstModes = []string{OldestFirstOn, OldestFirstOff}
@@ -141,25 +156,56 @@ func (t *tick) reserveOldest(pools []*store.Pool, byID map[string]*PoolPlan, run
 		}
 		return cmp.Compare(a.p.ID, b.p.ID)
 	})
-	// One reservation for a job that fits nowhere per machine: it closes the
-	// machine to younger work that does not fit beside it, and a second would
-	// only close it for longer.
+	// reserved is every host of the machines a reservation's pool could run
+	// on: a younger job that could run on any of them gets no reservation of
+	// its own, because one already holds room back there.
 	reserved := map[string]bool{}
 	for _, c := range line {
 		applied := t.applyHolds(c.p, c.job)
 		var hold *Hold
 		if h := t.hosts.pick(c.p, nil); h != nil {
 			hold = t.newHold(c.p, c.job, h, true, runners[c.p.ID], demand[c.p.ID])
-		} else if h := t.hosts.soonest(c.p, reserved); h != nil {
-			hold = t.newHold(c.p, c.job, h, false, runners[c.p.ID], demand[c.p.ID])
-			reserved[h.ID] = true
-			for _, id := range t.hosts.siblings[h.ID] {
-				reserved[id] = true
+		} else if t.waitedToReserve(c.job) && !t.hosts.sharesReservation(c.p, reserved) {
+			if h := t.hosts.soonest(c.p); h != nil {
+				hold = t.newHold(c.p, c.job, h, false, runners[c.p.ID], demand[c.p.ID])
+				t.hosts.markReserved(c.p, reserved)
 			}
 		}
 		t.releaseHolds(applied)
 		if hold != nil {
 			t.holds = append(t.holds, hold)
+		}
+	}
+}
+
+// waitedToReserve says whether a job that fits nowhere has waited long enough
+// to have room reserved for it (reserveAfter). A job GitHub stamped in our
+// future has waited for a time nobody can measure, so it waits its two
+// minutes from when it was first seen like any other rather than at once.
+func (t *tick) waitedToReserve(j *store.Job) bool {
+	return !j.QueuedInFuture(t.now) && j.QueuedAge(t.now) >= reserveAfter
+}
+
+// sharesReservation reports whether any machine p could run on already
+// carries a reservation for an older job.
+func (hs *hostSet) sharesReservation(p *store.Pool, reserved map[string]bool) bool {
+	for _, h := range hs.hosts {
+		if reserved[h.ID] && HostCanRun(h, p, hs.now) {
+			return true
+		}
+	}
+	return false
+}
+
+// markReserved marks every host, and every agent sharing its machine, that p
+// could run on.
+func (hs *hostSet) markReserved(p *store.Pool, reserved map[string]bool) {
+	for _, h := range hs.hosts {
+		if HostCanRun(h, p, hs.now) {
+			reserved[h.ID] = true
+			for _, id := range hs.siblings[h.ID] {
+				reserved[id] = true
+			}
 		}
 	}
 }
@@ -260,16 +306,16 @@ func (hs *hostSet) debitHold(h *Hold, sign int64) {
 }
 
 // soonest is the host a runner of p, which fits nowhere now, will fit on
-// first: among the hosts that could ever run it and carry no other
-// reservation, the one with the smallest shortfall, as a share of the runner,
+// first: among the hosts that could ever run it, the one with the smallest
+// shortfall, as a share of the runner,
 // in memory and CPU, with a host out of slots or holding starts for CPU
 // pressure counted a little further away. Nil where no host could ever run
 // it, which the pool's own reason already says.
-func (hs *hostSet) soonest(p *store.Pool, reserved map[string]bool) *store.Host {
+func (hs *hostSet) soonest(p *store.Pool) *store.Host {
 	var best *store.Host
 	bestScore := 0.0
 	for _, h := range hs.hosts {
-		if reserved[h.ID] || !HostCanRun(h, p, hs.now) {
+		if !HostCanRun(h, p, hs.now) {
 			continue
 		}
 		need, left, a := Reserve(p, h), hs.leftFor(h, p), hs.alloc[h.ID]

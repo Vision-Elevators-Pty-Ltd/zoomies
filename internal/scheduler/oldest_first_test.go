@@ -301,3 +301,54 @@ func TestOldestFirstOffHoldsNothing(t *testing.T) {
 		t.Fatalf("off: holds %+v, younger creates %d; want none and 1", plan.Holds, len(createsFor(plan, small.ID)))
 	}
 }
+
+// A job that fits nowhere is reserved for only once it has waited two
+// minutes: before that, younger work that fits goes ahead as it always did,
+// because a reservation idles the room it fills.
+func TestAJobIsReservedForOnlyOnceItHasWaitedTwoMinutes(t *testing.T) {
+	big := limited("visual", 8, 24*gb)
+	small := limited("image", 2, 4*gb)
+	var runners []*store.Runner
+	for i := range 5 {
+		runners = append(runners, busyAt(fmt.Sprintf("r%d", i), small, "host_a"))
+	}
+	for _, tc := range []struct {
+		waited  time.Duration
+		reserve bool
+	}{{reserveAfter - time.Second, false}, {reserveAfter, true}} {
+		jobs := []*store.Job{queued("job_old", tc.waited, "visual"), queued("job_young", time.Second, "image")}
+		plan := Decide(oldestFirstSnap([]*store.Pool{big, small}, runners, jobs, []*store.Host{fullHost("host_a", 5)}))
+		if got := poolPlan(t, plan, big.ID).Reserved != nil; got != tc.reserve {
+			t.Errorf("waited %s: reserved = %v, want %v", tc.waited, got, tc.reserve)
+		}
+		if got := len(createsFor(plan, small.ID)); got != map[bool]int{false: 1, true: 0}[tc.reserve] {
+			t.Errorf("waited %s: younger creates = %d", tc.waited, got)
+		}
+	}
+}
+
+// Only the oldest job that fits nowhere is reserved for among pools that share
+// machines: a second reservation for a younger one would idle more room, and
+// it is next in line anyway.
+func TestOnlyTheOldestJobThatFitsNowhereIsReservedFor(t *testing.T) {
+	big := limited("visual", 8, 24*gb)
+	other := limited("shard", 8, 24*gb)
+	small := limited("image", 2, 4*gb)
+	small.MaxRunners = 20
+	var runners []*store.Runner
+	for i := range 5 {
+		runners = append(runners, busyAt(fmt.Sprintf("ra%d", i), small, "host_a"))
+		runners = append(runners, busyAt(fmt.Sprintf("rb%d", i), small, "host_b"))
+	}
+	jobs := []*store.Job{queued("job_old", 10*time.Minute, "visual"), queued("job_next", 9*time.Minute, "shard"),
+		queued("job_young", time.Minute, "image")}
+	plan := Decide(oldestFirstSnap([]*store.Pool{big, other, small}, runners, jobs,
+		[]*store.Host{fullHost("host_a", 5), fullHost("host_b", 5)}))
+	if len(plan.Holds) != 1 || plan.Holds[0].JobID != "job_old" {
+		t.Fatalf("Holds = %+v, want one, for the oldest job", plan.Holds)
+	}
+	// The other host is not reserved, so younger work still starts there.
+	if c := createsFor(plan, small.ID); len(c) != 1 || c[0].HostID == plan.Holds[0].HostID {
+		t.Errorf("younger creates = %+v, want one on the host not reserved", c)
+	}
+}

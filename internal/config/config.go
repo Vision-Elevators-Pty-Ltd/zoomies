@@ -828,8 +828,9 @@ type Scheduler struct {
 	// OldestFirst is on or off: whether the room on a full fleet goes to the
 	// oldest waiting job first. On, each pass lines up every pool's oldest
 	// waiting job across all pools and holds room for it: where its runner
-	// fits, until it is placed; where it fits nowhere, its whole size on the
-	// host it will fit on soonest. Younger work starts only in what is left
+	// fits, until it is placed; for the oldest job that fits nowhere, once it
+	// has waited two minutes, its whole size on the host it will fit on
+	// soonest (one such job among pools sharing machines). Younger work starts only in what is left
 	// beside those holds, so it can no longer overtake an old job whose
 	// runner is larger than the room each finished job frees. Off hands room
 	// out as before: least recently served pool first, a pool that does not

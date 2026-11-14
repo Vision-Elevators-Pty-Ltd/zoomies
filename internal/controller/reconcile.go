@@ -128,6 +128,7 @@ func (c *Controller) reconcileLocked(ctx context.Context) (time.Time, error) {
 	c.setLastPlan(plan)
 	c.setReserved(snap)
 	c.apply(ctx, snap, plan)
+	c.noteHolds(ctx, snap, plan)
 	if !c.transferDraining.Load() {
 		c.routeFallbacks(ctx, snap, plan)
 		c.publishCapacitySignals(ctx, snap, plan)

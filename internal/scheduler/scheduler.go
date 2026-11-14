@@ -165,6 +165,11 @@ type Policy struct {
 	// job needs more (see history_raise.go). Anything else, the zero value
 	// included, keeps every runner at its typed size.
 	HistoryRaise string
+	// OldestFirst is scheduler.oldest_first: on holds room for the oldest
+	// waiting jobs across pools so younger work cannot keep overtaking them
+	// (see oldest_first.go). Anything else, the zero value included, hands
+	// room out as before: least recently served pool first.
+	OldestFirst string
 	// MachineLabel is scheduler.machine_label: hosts carrying the same value of
 	// this label are agents on one machine, and share its memory ceiling and
 	// its measured free memory. Empty treats every host as a machine of its own.
@@ -316,6 +321,20 @@ type PoolPlan struct {
 	// supply is the runners already there for a queued job to take: idle, or
 	// still starting. A busy runner is not, and a draining one never will be.
 	supply int
+	// waiting is the jobs that drove Desired, oldest first: the order the
+	// pool's runners take them in, which is what oldest-first admission lines
+	// pools up by.
+	waiting []*store.Job
+	// Reserved is, under scheduler.oldest_first, the room held this pass for
+	// this pool's oldest waiting job, which fits nowhere yet: younger work
+	// starts on that host only in what is left beside it. WaitingFor is the
+	// other side: the older job whose hold kept this pool's runner out.
+	Reserved   *Hold `json:"reserved,omitempty"`
+	WaitingFor *Hold `json:"waiting_for,omitempty"`
+	// WaitingJobID is the job of this pool's that WaitingFor kept waiting: its
+	// oldest one no runner is on its way for. Empty for a pool scaling for its
+	// minimum alone.
+	WaitingJobID string `json:"waiting_job_id,omitempty"`
 	// Unserved is how many of the queued jobs that drove Desired have no runner
 	// idle, starting or created for them this pass: the pool is at its maximum,
 	// or no host has room. A pool held back by a start failure or a rate limit
@@ -419,6 +438,11 @@ type Plan struct {
 	// history_raise off, and where the snapshot had no Booking to say which
 	// job each runner runs; empty where it did and no runner needs more.
 	RunnerNeeds map[string]int64 `json:"-"`
+	// Holds is, under scheduler.oldest_first, the room the pass kept for the
+	// oldest waiting jobs and had not yet handed to them when it ended. A hold
+	// with Fits false is a job that fits nowhere yet, reserved on the host it
+	// will fit on soonest.
+	Holds []Hold `json:"holds,omitempty"`
 }
 
 // UnmatchedJob is a queued job no pool claimed, and why.
@@ -494,6 +518,15 @@ func Decide(s Snapshot) Plan {
 		}
 	}
 	t.allocate(pools, plan.Pools, s.Runners, demand)
+	for _, h := range t.holds {
+		plan.Holds = append(plan.Holds, *h)
+		for i := range plan.Pools {
+			if pp := &plan.Pools[i]; pp.PoolID == h.PoolID && !h.Fits {
+				c := *h
+				pp.Reserved = &c
+			}
+		}
+	}
 	for i := range plan.Pools {
 		pp := &plan.Pools[i]
 		pp.Unserved = max(0, pp.eligible-pp.supply-creates(pp.Actions))
@@ -541,6 +574,9 @@ type tick struct {
 	// waiting job can still be handed.
 	raised map[string]int
 	acted  map[string]bool
+	// holds is the room oldest-first admission keeps for the oldest waiting
+	// jobs, oldest first (see oldest_first.go).
+	holds []*Hold
 }
 
 // assign maps every queued job onto the pool that will run it, and collects the
@@ -680,7 +716,9 @@ func (t *tick) decidePool(p *store.Pool, runners []*store.Runner, queued []*stor
 		}
 		eligible++
 		admitted[j.Repo]++
+		plan.waiting = append(plan.waiting, j)
 	}
+	sortWaiting(plan.waiting)
 	for repo := range quotaRepositories {
 		plan.QuotaDeferredRepositories = append(plan.QuotaDeferredRepositories, repo)
 	}
@@ -928,6 +966,9 @@ func (t *tick) allocate(pools []*store.Pool, plans []PoolPlan, runners map[strin
 
 	// The share across tiers is granted before any tier is served, so that
 	// what is left is what priority then decides.
+	if t.policy.oldestFirst() {
+		t.reserveOldest(tiers, byID, runners, demand)
+	}
 	shared, floor := t.shareAcrossTiers(tiers, byID, runners, demand)
 	for start := 0; start < len(tiers); {
 		end := start + 1
@@ -1067,6 +1108,10 @@ func (t *tick) grant(p *store.Pool, plan *PoolPlan, runners []*store.Runner, que
 		t.hosts.need = &need
 	}
 	avoid := recentBusyHosts(runners, t.now)
+	// Under oldest-first admission the room held for older jobs is taken out
+	// while this pool is placed, and put back after: a younger request starts
+	// only in what is left beside them.
+	applied := t.applyHolds(p, oldestUnserved(plan))
 	// A job waiting here that is known to need more than the pool's typed
 	// size is placed for first, on a host with room for it raised. Where none
 	// has, the runner is placed exactly as it would be without the raise: a
@@ -1093,6 +1138,22 @@ func (t *tick) grant(p *store.Pool, plan *PoolPlan, runners []*store.Runner, que
 		placed = t.hosts.placeAvoiding(p, 1, avoid)
 	}
 	t.hosts.need = nil
+	t.releaseHolds(applied)
+	if len(placed) == 0 {
+		if hold := t.heldBy(p, avoid, applied); hold != nil {
+			what := "waiting: " + hold.Phrase(t.now)
+			c := *hold
+			plan.WaitingFor = &c
+			if j := oldestUnserved(plan); j != nil {
+				plan.WaitingJobID = j.ID
+			}
+			plan.Reason = cannotScale(p.Name, plan.Current+creates(plan.Actions), plan.Desired, what)
+			plan.Blocked = what
+			plan.BlockedFix = "wait: the older job starts there first and younger work uses what is left beside it (scheduler.oldest_first); nothing needs changing"
+			plan.BlockedAtCapacity = true
+			return false
+		}
+	}
 	if len(placed) == 0 && enforce && len(heldOff) > 0 {
 		// Some host would have taken a runner at the pool's own size, and
 		// every one of them is short of what the jobs waiting are known to
@@ -1108,6 +1169,11 @@ func (t *tick) grant(p *store.Pool, plan *PoolPlan, runners []*store.Runner, que
 	}
 	if len(placed) == 0 {
 		b := t.hosts.why(p)
+		if hold := t.holdOf(p); hold != nil && !hold.Fits {
+			// The pool's own hold: the room it is waiting for is kept for it.
+			b.what += fmt.Sprintf("; %s is reserved for its oldest job %s, so younger work starts there only in what is left beside it",
+				naming.ForSentence(hold.HostName), hold.JobID)
+		}
 		plan.Reason = cannotScale(p.Name, plan.Current+creates(plan.Actions), plan.Desired, sentence(b.what, b.fix))
 		plan.Blocked, plan.BlockedFix = b.what, b.fix
 		plan.BlockedAtCapacity, plan.BlockedAlternatives = b.atCapacity, b.alternatives
@@ -1181,6 +1247,7 @@ func (t *tick) grant(p *store.Pool, plan *PoolPlan, runners []*store.Runner, que
 			plan.History = "shadow: history sizing would have " + held
 		}
 	}
+	t.dropHold(p)
 	action := Action{Kind: ActionCreate, PoolID: p.ID, PoolName: p.Name, HostID: placed[0].hostID, Reason: reason, Size: placed[0].size, SizedFromHistory: placed[0].raised, StartCharge: placed[0].charge}
 	plan.Actions = append(plan.Actions, action)
 	t.creates = append(t.creates, action)

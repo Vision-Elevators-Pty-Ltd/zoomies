@@ -14781,8 +14781,11 @@ components:
         that says why; a fleet that leaves size routing `off` writes none. `acknowledged`
         and `reopened` are the fleet's triage of a failure: somebody said they had read it,
         and somebody put it back in front of whoever looks next. Neither changes the job,
-        which is why they are entries here rather than a move of the job.
-      enum: [queued, waiting, approved, claimed, unmatched, started, completed, runner_lost, runner_returned, cancel_requested, runner_start_failed, rerun_requested, oom_killed, sized, acknowledged, reopened]
+        which is why they are entries here rather than a move of the job. `reserved` is
+        oldest-first admission (`scheduler.oldest_first`): on an old job whose runner fits on
+        no host yet, which host's room is reserved for it; on a younger job, which older job
+        it is waiting behind and on which host. It is written once per change, not every pass.
+      enum: [queued, waiting, approved, claimed, unmatched, started, completed, runner_lost, runner_returned, cancel_requested, runner_start_failed, rerun_requested, oom_killed, sized, acknowledged, reopened, reserved]
 
     JobEvent:
       type: object

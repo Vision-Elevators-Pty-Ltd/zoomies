@@ -825,6 +825,17 @@ type Scheduler struct {
 	// given a memory-valve rule to grow into it. Off is the typed size,
 	// always.
 	HistoryRaise string `yaml:"history_raise"`
+	// OldestFirst is on or off: whether the room on a full fleet goes to the
+	// oldest waiting job first. On, each pass lines up every pool's oldest
+	// waiting job across all pools and holds room for it: where its runner
+	// fits, until it is placed; where it fits nowhere, its whole size on the
+	// host it will fit on soonest. Younger work starts only in what is left
+	// beside those holds, so it can no longer overtake an old job whose
+	// runner is larger than the room each finished job frees. Off hands room
+	// out as before: least recently served pool first, a pool that does not
+	// fit skipped. Pool sizes, host capacity and the hosts a pool may use are
+	// the same either way.
+	OldestFirst string `yaml:"oldest_first"`
 	// SizeRouting is off, shadow or on: whether jobs are classed small, medium
 	// or large from what their runs used, and sent to a pool for that class.
 	// Shadow works the class out and records it, and where the job ran, without
@@ -1358,7 +1369,10 @@ func Default() *Config {
 			HistorySizing:           "shadow",
 			// On, because it only ever acts for a job whose own history says the
 			// typed size kills it, and only on a host with room for the rest.
-			HistoryRaise:            "on",
+			HistoryRaise: "on",
+			// On: a full fleet otherwise starves its largest runners (13 Nov
+			// 2026: a 24 GB job overtaken by 18-56 younger ones for 8-10 min).
+			OldestFirst:             "on",
 			HostThrottling:          true,
 			HostAutoAdjust:          true,
 			AutoRerunLimit:          1,

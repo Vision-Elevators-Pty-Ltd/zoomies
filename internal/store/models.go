@@ -2115,6 +2115,12 @@ const (
 	// failure asks for attention again. It exists so the timeline explains
 	// why a row returned to the list it had left.
 	JobEventReopened JobEventKind = "reopened"
+	// JobEventReserved: oldest-first admission (scheduler.oldest_first) held
+	// room for an older job ahead of this one. On the old job it says its
+	// runner fits nowhere yet and which host's room is kept for it; on a
+	// younger job it says which older job it is waiting behind and where.
+	// Written once per change, not every pass.
+	JobEventReserved JobEventKind = "reserved"
 )
 
 // JobEvent is one entry in a job's timeline: what happened, who observed it,

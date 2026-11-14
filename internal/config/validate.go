@@ -357,6 +357,7 @@ func (c *Config) Validate() Findings {
 func (c *Config) validateChoicesAndBounds(add func(Finding)) {
 	c.refuseUnknownChoice(add, Finding{Code: "scheduler.history_sizing", Severity: SeverityError, Setting: "scheduler.history_sizing", Title: "unknown history sizing mode"}, c.Scheduler.HistorySizing)
 	c.refuseUnknownChoice(add, Finding{Code: "scheduler.history_raise", Severity: SeverityError, Setting: "scheduler.history_raise", Title: "unknown history raise mode"}, c.Scheduler.HistoryRaise)
+	c.refuseUnknownChoice(add, Finding{Code: "scheduler.oldest_first", Severity: SeverityError, Setting: "scheduler.oldest_first", Title: "unknown oldest-first mode"}, c.Scheduler.OldestFirst)
 	// Read as the runtime reads it, trimmed and in lower case (Security.AutoApplyMode).
 	c.refuseUnknownChoice(add, Finding{Code: "security.auto_apply_remedies", Severity: SeverityError, Setting: "security.auto_apply_remedies", Title: "unknown automatic-apply mode"},
 		strings.ToLower(strings.TrimSpace(c.Security.AutoApplyRemedies)))

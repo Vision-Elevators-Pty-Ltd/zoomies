@@ -658,6 +658,16 @@ const JOB_EVENTS: Record<JobEventKind, StatusMeta> = {
     IterationCcw,
     'Somebody put this failure back in the list of failures needing attention after it had been acknowledged.',
   ),
+  // Oldest-first admission. Pending, not danger: nothing failed, the fleet is
+  // full and is keeping room for the oldest job first.
+  reserved: meta(
+    'reserved',
+    'Room reserved',
+    'pending',
+    'dashed',
+    Hourglass,
+    'The fleet is full and keeps room for the oldest waiting job first. On an old job this says which host its room is kept on; on a younger one, which older job it is waiting behind.',
+  ),
 };
 
 /**

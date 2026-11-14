@@ -346,6 +346,11 @@ type Controller struct {
 	// is whether this is happening now, not whether it once did.
 	deferredMints map[string]int
 	deferredSince map[string]time.Time
+	// holdNotes is, by job ID, the oldest-first sentence last written on each
+	// queued job's timeline, so a job waiting through many passes gets one
+	// entry per change rather than one per pass. Read and written only under
+	// reconcileMu.
+	holdNotes map[string]string
 
 	mu sync.Mutex
 	// lastPlan is the most recent scheduler decision, kept so that Problems
@@ -1127,6 +1132,7 @@ func (c *Controller) policy() scheduler.Policy {
 		MemoryAdmission:              c.cfg().Scheduler.MemoryAdmission,
 		MachineLabel:                 c.cfg().Scheduler.MachineLabel,
 		HistoryRaise:                 c.cfg().Scheduler.HistoryRaise,
+		OldestFirst:                  c.cfg().Scheduler.OldestFirst,
 		MaxRunnerLifetime:            c.cfg().Scheduler.MaxRunnerLifetime,
 		ProvisionTimeout:             c.cfg().Scheduler.ProvisionTimeout,
 		DrainTimeout:                 c.cfg().Scheduler.DrainTimeout,
